@@ -68,10 +68,10 @@ static inline struct file *ci_get_file_rcu(struct file **f)
 #define efab_access_ok access_ok
 #endif
 
-/* is_compat_task() was removed for x86 in linux-4.6 but restored in later kernels */
+/* is_compat_task() was removed for x86 in linux-4.6 */
 #ifdef EFRM_NEED_IS_COMPAT_TASK
-/* Only define if kernel doesn't provide it (old kernels) */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+/* Only define if not already defined by kernel headers */
+#ifndef is_compat_task
 static inline int is_compat_task(void)
 {
 #if !defined(CONFIG_COMPAT)
@@ -90,7 +90,7 @@ static inline int is_compat_task(void)
   #error "cannot define is_compat_task() for this architecture"
 #endif
 }
-#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0) */
+#endif /* !is_compat_task */
 #endif /* EFRM_NEED_IS_COMPAT_TASK */
 
 /* skb_frag_off() was added in linux-5.4 */

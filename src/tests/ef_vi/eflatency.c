@@ -26,15 +26,28 @@
 #include <limits.h>
 #include <time.h>
 
+#include <stdint.h>
+
 #if defined(__x86_64__)
+
 static inline uint64_t frc64_get(void) {
   uint64_t val, low, high;
   __asm__ __volatile__("rdtsc" : "=a" (low) , "=d" (high));
   val = (high << 32) | low;
   return val;
 }
+
+#elif defined(__aarch64__)
+
+static inline uint64_t frc64_get(void) {
+  uint64_t val;
+  // Read the virtual counter (CNTVCT_EL0)
+  asm volatile("mrs %0, cntvct_el0" : "=r" (val));
+  return val;
+}
+
 #else
-#error "X86_64 required"
+#error "Unsupported architecture"
 #endif
 
 static int measure_cpu_khz(unsigned* cpu_khz)

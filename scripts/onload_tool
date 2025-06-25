@@ -338,19 +338,50 @@ cmd_post_install() {
 
 ######################################################################
 
+is_arm64_kernel68_plus() {
+  # Check if we're on ARM64 with kernel 6.8+ that needs syscall table workaround
+  if [ "$(uname -m)" = "aarch64" ]; then
+    # Extract kernel version
+    kernel_version=$(uname -r | cut -d. -f1-2)
+    major=$(echo $kernel_version | cut -d. -f1)
+    minor=$(echo $kernel_version | cut -d. -f2)
+    
+    # Check if kernel >= 6.8
+    if [ "$major" -gt 6 ] || ([ "$major" -eq 6 ] && [ "$minor" -ge 8 ]); then
+      return 0  # true
+    fi
+  fi
+  return 1  # false
+}
+
 cmd_reload() {
   onload_only="0"
   [ "$1" = "--onload-only" ] && onload_only="1" && shift
   [ $# = 0 ] || usage
   do_unload ${onload_only} || fail "ERROR: could not unload all drivers"
-  if [ ${onload_only} != "1" ]; then
-    # After v5_2_1_1003 net driver version, Onload module doesn't depend on sfc
-    # module, so need to load sfc driver separately
-    trylog /sbin/modprobe sfc
-    isloaded sfc || fail "ERROR: sfc driver did not load"
+  
+  # Check if we need ARM64-specific loading for kernel 6.8+
+  if is_arm64_kernel68_plus; then
+    log "Detected ARM64 kernel 6.8+, using ARM64 helper for module loading"
+    # Use the ARM64 helper to load prerequisite modules with syscall table address
+    trylog /usr/sbin/onload_arm64_helper
+    # Now load onload module directly without triggering install script again
+    trylog /sbin/modprobe --ignore-install onload
+    if [ ${onload_only} != "1" ]; then
+      isloaded sfc || fail "ERROR: sfc driver did not load"
+    fi
+    isloaded onload || fail "ERROR: onload module did not load"
+  else
+    # Standard loading for other architectures
+    if [ ${onload_only} != "1" ]; then
+      # After v5_2_1_1003 net driver version, Onload module doesn't depend on sfc
+      # module, so need to load sfc driver separately
+      trylog /sbin/modprobe sfc
+      isloaded sfc || fail "ERROR: sfc driver did not load"
+    fi
+    trylog /sbin/modprobe onload
+    isloaded onload || fail "ERROR: onload module did not load"
   fi
-  trylog /sbin/modprobe onload
-  isloaded onload || fail "ERROR: onload module did not load"
   # NB. sfc_aoe not always installed; don't want to moan...
   /sbin/modprobe sfc_aoe >/dev/null 2>&1
   exit 0

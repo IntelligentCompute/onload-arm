@@ -68,8 +68,10 @@ static inline struct file *ci_get_file_rcu(struct file **f)
 #define efab_access_ok access_ok
 #endif
 
-/* is_compat_task() was removed for x86 in linux-4.6 */
+/* is_compat_task() was removed for x86 in linux-4.6 but restored in later kernels */
 #ifdef EFRM_NEED_IS_COMPAT_TASK
+/* Only define if kernel doesn't provide it (old kernels) */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 static inline int is_compat_task(void)
 {
 #if !defined(CONFIG_COMPAT)
@@ -82,11 +84,14 @@ static inline int is_compat_task(void)
   #endif
 #elif defined(CONFIG_PPC64)
   return test_thread_flag(TIF_32BIT);
+#elif defined(CONFIG_ARM64)
+  return test_thread_flag(TIF_32BIT);
 #else
   #error "cannot define is_compat_task() for this architecture"
 #endif
 }
-#endif
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0) */
+#endif /* EFRM_NEED_IS_COMPAT_TASK */
 
 /* skb_frag_off() was added in linux-5.4 */
 #ifdef EFRM_NEED_SKB_FRAG_OFF
@@ -160,8 +165,8 @@ oo_copy_file_owner(struct file *file_to, struct file *file_from)
   return 0;
 }
 
-#ifdef EFRM_CLOEXEC_FILES_STRUCT
-/* linux 6.12+ */
+#if defined(EFRM_CLOEXEC_FILES_STRUCT) || LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,0)
+/* linux 6.11+ - close_on_exec takes files_struct directly */
 #define efrm_close_on_exec close_on_exec
 #else
 static inline bool efrm_close_on_exec(unsigned int fd,
@@ -169,7 +174,7 @@ static inline bool efrm_close_on_exec(unsigned int fd,
 {
 	return close_on_exec(fd, files_fdtable(files));
 }
-#endif
+#endif /* EFRM_CLOEXEC_FILES_STRUCT || kernel >= 6.11 */
 
 #ifdef EFRM_HAVE_SKB_RECV_NOBLOCK_PARAM
 static inline struct sk_buff *efrm_skb_recv_datagram(struct sock *sk,

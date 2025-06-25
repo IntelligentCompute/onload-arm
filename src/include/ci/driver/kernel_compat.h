@@ -510,13 +510,13 @@ static inline int efrm_follow_pfn(struct vm_area_struct *vma,
 #elif defined(EFRM_HAVE_FOLLOW_PTE)
 /* exported in linux 5.10+ */
 
-#ifdef EFRM_HAVE_FOLLOW_PTE_VMA
+#if defined(EFRM_HAVE_FOLLOW_PTE_VMA) || LINUX_VERSION_CODE >= KERNEL_VERSION(6,10,0)
 /* linux >= 6.10 */
 #define efrm_follow_pte follow_pte
 #else
 #define efrm_follow_pte(vma, addr, ptep, ptl) \
   follow_pte(vma->vm_mm, addr, ptep, ptl)
-#endif /* EFRM_HAVE_FOLLOW_PTE_VMA */
+#endif /* EFRM_HAVE_FOLLOW_PTE_VMA || kernel >= 6.10 */
 
 static inline int efrm_follow_pfn(struct vm_area_struct *vma,
                                   unsigned long addr, unsigned long *pfn)

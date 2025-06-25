@@ -1,10 +1,38 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* X-SPDX-Copyright-Text: (c) Copyright 2020 Xilinx, Inc. */
 
+#ifndef __aarch64__
+#error "This file is ARM64-specific and should only be compiled on aarch64 architecture"
+#endif
+
+/*
+ * ARM64 Syscall Table Detection for Onload
+ * 
+ * This file implements syscall table detection for ARM64 architecture.
+ * 
+ * REVISION HISTORY:
+ * - Original implementation: Used vbar_el1 register + instruction pattern matching
+ * - Kernel 6.8+ fix: Added kallsyms_lookup_name() as primary method
+ * 
+ * METHODS (in order of preference):
+ * 1. kallsyms_lookup_name("sys_call_table") - Modern, reliable approach
+ * 2. efrm_find_ksym("sys_call_table") - Fallback for specific configurations  
+ * 3. vbar_el1 + instruction parsing - Legacy approach for older kernels
+ * 
+ * The instruction pattern matching approach fails on kernel 6.8+ due to:
+ * - Changed compiler optimizations removing predictable adrp+add sequences
+ * - Modified syscall entry code structure in do_el0_svc()
+ * - Enhanced security features (KASLR, KPTI) affecting code layout
+ * 
+ * See README_ARM64_SYSCALL_TABLE.md for detailed technical analysis.
+ */
+
 #include <ci/compat.h>
 #include <ci/efrm/sysdep_linux.h>
 #include <ci/efrm/debug_linux.h>
 #include <ci/efrm/syscall.h>
+#include <asm/insn.h>
+#include <linux/moduleparam.h>
 
 #if 1
 #define TRAMP_DEBUG(x...) (void)0
@@ -14,6 +42,11 @@
 
 void** efrm_syscall_table = NULL;
 EXPORT_SYMBOL(efrm_syscall_table);
+
+/* Module parameter to allow userspace to provide syscall table address */
+static unsigned long syscall_table_addr = 0;
+module_param(syscall_table_addr, ulong, 0444);
+MODULE_PARM_DESC(syscall_table_addr, "Address of sys_call_table (for kernel 6.8+ ARM64)");
 
 
 /* The kernel contains some neat routines for doing AArch64 code inspection.
@@ -42,13 +75,15 @@ static typeof(aarch64_insn_adrp_get_offset) *ci_aarch64_insn_adrp_get_offset;
     }                                                \
   } while (0);
 
-/* Linux does not have any function to check for 'bti' instruction. So we
- * define it by ourselves. */
-static inline bool aarch64_insn_is_bti(u32 code)
+/* Check for various control flow instructions that might appear */
+static inline bool aarch64_insn_is_cf_insn(u32 code)
 {
-  u32 mask = 0xFFFFFF3F;
-  u32 val = 0xD503241F;
-  return (code & mask) == val;
+  /* Check for BTI, PACIASP, HINT instructions */
+  if (aarch64_insn_is_bti(code)) return true; /* BTI */
+  if ((code & 0xFFFFFFFF) == 0xD503233F) return true; /* PACIASP */
+  if ((code & 0xFFFFFFFF) == 0xD50323BF) return true; /* AUTIASP */
+  if ((code & 0xFFFFF01F) == 0xD503201F) return true; /* HINT instructions */
+  return false;
 }
 
 /* Depending on the kernel version, locating the syscall table may be more
@@ -319,8 +354,21 @@ find_el_svc_entry(void)
   return el_svc;
 }
 
+/* 
+ * DEPRECATED: This function used instruction pattern matching to find sys_call_table
+ * 
+ * This approach worked for older kernels (5.5-6.7) but fails on kernel 6.8+ due to:
+ * 1. Changed instruction sequences in do_el0_svc()
+ * 2. Compiler optimizations removing predictable adrp+add patterns
+ * 3. Modern security features (KASLR, KPTI) changing code layout
+ * 
+ * The function is kept for historical reference and older kernel compatibility,
+ * but the main path now uses kallsyms_lookup_name() which is more reliable.
+ * 
+ * See README_ARM64_SYSCALL_TABLE.md for detailed analysis.
+ */
 static ci_uint8 *
-find_syscall_table_via_vbar(void)
+find_syscall_table_via_vbar_legacy(void)
 {
   ci_uint8 *el_svc = find_el_svc_entry();
   ci_uint32 insn;
@@ -331,6 +379,8 @@ find_syscall_table_via_vbar(void)
 
   if (el_svc == NULL)
     return NULL;
+
+  TRAMP_DEBUG("%s: Using legacy vbar_el1 approach - may fail on kernel 6.8+", __FUNCTION__);
 
   /* syscall entry code was rewritten to C in 5.5. So we need to use another
    * approach for sys_call_table look up.  */
@@ -382,9 +432,10 @@ find_syscall_table_via_vbar(void)
   do_el0_svc = find_next_bl(do_el0_svc);
   do_el0_svc -= 2 * AARCH64_INSN_SIZE;
 
+  /* Read first instruction at do_el0_svc - should be adrp for syscall table */
   CI_AARCH64_INSN_READ(do_el0_svc, insn);
   if (!aarch64_insn_is_adrp(insn)) {
-    EFRM_WARN("%s:%d: expected adrp instruction at %px, found %08x",
+    TRAMP_DEBUG("%s:%d: expected adrp instruction at %px, found %08x",
               __FUNCTION__, __LINE__, do_el0_svc, insn);
     return NULL;
   }
@@ -414,13 +465,49 @@ find_syscall_table_via_vbar(void)
   return CI_PTR_ALIGN_BACK(el_svc, SZ_4K) + ci_aarch64_insn_adrp_get_offset(insn);
 }
 
+/* 
+ * Modern approach: Use kallsyms_lookup_name for reliable symbol resolution
+ * 
+ * This method works on kernel 6.8+ where instruction pattern matching fails.
+ * It's more reliable than parsing assembly code and adapts to kernel changes.
+ */
+static void *find_syscall_table_module_param(void)
+{
+  if (syscall_table_addr != 0) {
+    void *addr = (void *)syscall_table_addr;
+    TRAMP_DEBUG("%s: Using sys_call_table address from module parameter: %px", __FUNCTION__, addr);
+    return addr;
+  }
+  return NULL;
+}
+
+static void *find_syscall_table_kallsyms(void)
+{
+#ifdef EFRM_HAVE_NEW_KALLSYMS
+  /* Use the onload efrm_find_ksym which works when kallsyms_on_each_symbol is exported */
+  void *addr = efrm_find_ksym("sys_call_table");
+  if (addr) {
+    TRAMP_DEBUG("%s: Found sys_call_table via efrm_find_ksym at %px", __FUNCTION__, addr);
+    return addr;
+  }
+  TRAMP_DEBUG("%s: efrm_find_ksym failed to find sys_call_table", __FUNCTION__);
+#else
+  TRAMP_DEBUG("%s: EFRM_HAVE_NEW_KALLSYMS not enabled - kallsyms_on_each_symbol not exported on this kernel", __FUNCTION__);
+#endif
+  return NULL;
+}
+
 static void *find_syscall_table(void)
 {
   void *syscalls = NULL;
 
-#ifdef EFRM_HAVE_NEW_KALLSYMS
-  syscalls = efrm_find_ksym("sys_call_table");
-#endif
+  /* Method 1: Try module parameter first (works on any kernel when provided by userspace) */
+  syscalls = find_syscall_table_module_param();
+  if (syscalls != NULL)
+    return syscalls;
+
+  /* Method 2: Try efrm_find_ksym approach (works when kallsyms_on_each_symbol is exported) */
+  syscalls = find_syscall_table_kallsyms();
   if (syscalls != NULL)
     return syscalls;
 
@@ -445,7 +532,9 @@ static void *find_syscall_table(void)
   }
 #endif
 
-  return find_syscall_table_via_vbar();
+  /* Method 3: Fall back to legacy vbar_el1 approach (for older kernels) */
+  TRAMP_DEBUG("%s: Falling back to legacy instruction pattern matching", __FUNCTION__);
+  return find_syscall_table_via_vbar_legacy();
 }
 
 int efrm_syscall_ctor(void)

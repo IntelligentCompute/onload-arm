@@ -1,0 +1,26 @@
+#!/bin/bash
+# ARM64 helper script for onload module loading on kernel 6.8+
+# This script handles the syscall table detection issue
+
+set -e
+
+# Get the syscall table address from /proc/kallsyms
+SYSCALL_ADDR=$(grep " sys_call_table" /proc/kallsyms | awk '{print "0x" $1}')
+
+if [ -z "$SYSCALL_ADDR" ]; then
+    echo "ERROR: Could not find sys_call_table in /proc/kallsyms" >&2
+    exit 1
+fi
+
+# Load modules in the correct order with proper parameters
+echo "Loading sfc driver..."
+/sbin/modprobe sfc
+
+echo "Loading sfc_resource with syscall_table_addr=$SYSCALL_ADDR..."
+/sbin/modprobe --ignore-install sfc_resource syscall_table_addr=$SYSCALL_ADDR
+
+echo "Loading sfc_char..."
+/sbin/modprobe --ignore-install sfc_char
+
+# The onload module will be loaded by the calling modprobe command
+echo "ARM64 helper: Ready for onload module loading"

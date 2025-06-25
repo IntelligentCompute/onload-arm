@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* SPDX-FileCopyrightText: Copyright (c) 2023 Advanced Micro Devices, Inc. */
 
+#ifndef __aarch64__
+#error "This file is ARM64-specific and should only be compiled on aarch64 architecture"
+#endif
+
 #include "ci_arm64_insn.h"
 
 #ifndef EFRM_HAVE_NEW_KALLSYMS

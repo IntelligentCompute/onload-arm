@@ -69,9 +69,8 @@ static inline struct file *ci_get_file_rcu(struct file **f)
 #endif
 
 /* is_compat_task() was removed for x86 in linux-4.6 */
-#ifdef EFRM_NEED_IS_COMPAT_TASK
-/* Only define if not already defined by kernel headers */
-#ifndef is_compat_task
+#if defined(EFRM_NEED_IS_COMPAT_TASK) && !defined(CONFIG_ARM64)
+/* ARM64 kernels provide is_compat_task(), only define for other archs */
 static inline int is_compat_task(void)
 {
 #if !defined(CONFIG_COMPAT)
@@ -84,14 +83,11 @@ static inline int is_compat_task(void)
   #endif
 #elif defined(CONFIG_PPC64)
   return test_thread_flag(TIF_32BIT);
-#elif defined(CONFIG_ARM64)
-  return test_thread_flag(TIF_32BIT);
 #else
   #error "cannot define is_compat_task() for this architecture"
 #endif
 }
-#endif /* !is_compat_task */
-#endif /* EFRM_NEED_IS_COMPAT_TASK */
+#endif
 
 /* skb_frag_off() was added in linux-5.4 */
 #ifdef EFRM_NEED_SKB_FRAG_OFF

@@ -26,7 +26,7 @@ $(CPLANE_LIB): $(LIB_OBJS)
 	$(MMakeLinkStaticLib)
 
 # BMI2 instructions only available on x86_64
-ifeq ($(MMAKE_MK_PLATFORM),gnu_x86_64)
+ifeq ($(shell uname -m),x86_64)
 uapi_resolve.o: MMAKE_CFLAGS+=-mbmi2
 endif
 $(UAPI_LIB_OBJS) : $(CP_INTF_VER_HDR)

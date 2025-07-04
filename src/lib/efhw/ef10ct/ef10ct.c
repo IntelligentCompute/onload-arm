@@ -55,7 +55,7 @@ int ef10ct_fw_rpc(struct efhw_nic *nic, struct efx_auxdev_rpc *cmd)
   struct efx_auxdev* edev;
   struct efx_auxdev_client* cli;
 
-  /* FIXME need to handle reset stuff here */
+  /* TODO ON-16697 need to handle reset stuff here */
   AUX_PRE(dev, edev, cli, nic, rc);
   rc = edev->llct_ops->base_ops->fw_rpc(cli, cmd);
   AUX_POST(dev, edev, cli, nic, rc);
@@ -369,7 +369,7 @@ static void ef10ct_irq_free(struct efhw_nic *nic, uint32_t channel,
   edev->llct_ops->irq_free(cli, auxdev_irq);
   AUX_POST(dev, edev, cli, nic, rc);
   /* This can fail in the case that the NIC is currently under reset.
-   * FIXME EF10CT net driver behaviour needs checking here - we don't want
+   * TODO ON-16697 net driver behaviour needs checking here - we don't want
    * it to reset any state post reset. */
   EFHW_ASSERT(nic->resetting || !rc); /* rc may be updated in AUX_PRE */
 
@@ -567,10 +567,6 @@ out:
   return rc;
 }
 
-
-/* FIXME EF10CT
- * X3 net driver does dma mapping
- */
 static int
 ef10ct_nic_event_queue_enable(struct efhw_nic *nic,
                               struct efhw_evq_params *efhw_params)
@@ -640,6 +636,7 @@ ef10ct_nic_event_queue_enable(struct efhw_nic *nic,
                       MC_CMD_INIT_EVQ_V2_IN_COUNT_MODE_DIS);
   EFHW_MCDI_SET_DWORD(in, INIT_EVQ_V2_IN_COUNT_THRSHLD, 0);
 
+  /* TODO ON-16668 purge test driver */
   if( (nic->devtype.variant != 'L') )
     EFHW_MCDI_SET_DWORD(in, INIT_EVQ_V2_IN_IRQ_NUM,
                         efhw_params->wakeup_channel);
@@ -835,7 +832,7 @@ static int ef10ct_vi_alloc_hw(struct efhw_nic *nic,
   if( n_vis != 1 )
     return -EOPNOTSUPP;
 
-  /* FIXME EF10CT re-allocation post reset needs consideration */
+  /* TODO ON-16697 re-allocation post reset needs consideration */
 
   evq_rc = ef10ct_alloc_evq(nic);
   if (evq_rc < 0) {
@@ -1053,7 +1050,7 @@ static int ef10ct_rx_iomap_buffer_post_register(struct efhw_nic *nic,
   if( rc < 0 )
     return rc;
 
-  /* TODO EF10CT The 'L' variant is reported by fake test hardware, which
+  /* TODO ON-16668 The 'L' variant is reported by fake test hardware, which
    * doesn't provide iomem.
   */
   if( (nic->devtype.arch == EFHW_ARCH_EF10CT) &&
@@ -1159,7 +1156,7 @@ ef10ct_shared_rxq_bind(struct efhw_nic* nic,
 
   /* Choose which evq to bind this rxq to. */
   if( !real_evq ) {
-    /* FIXME EF10CT the evq used here is not mapped to userspace, so isn't part
+    /* FIXME ON-16187 the evq used here is not mapped to userspace, so isn't part
      * of the higher level resource management. We need to decide which shared
      * evq to attach to - one with rx event suppression, or not.
      * Currently we only support using a single shared queue. In order to
@@ -1309,6 +1306,7 @@ ef10ct_shared_rxq_unbind(struct efhw_nic* nic, struct efhw_efct_rxq *rxq,
     return;
   }
 
+  /* TODO ON-16668 purge test driver */
   if ( ! ((nic->devtype.arch == EFHW_ARCH_EF10CT) &&
           (nic->devtype.variant == 'L')) )
   {
@@ -1379,7 +1377,7 @@ ef10ct_dmaq_rx_q_init(struct efhw_nic *nic,
 static size_t
 ef10ct_max_shared_rxqs(struct efhw_nic *nic)
 {
-  /* FIXME EF10CT this needs to mean exactly one of "needs packet shm"
+  /* TODO ON-16696 this needs to mean exactly one of "needs packet shm"
    * (efct_only) or "attaches to shared rxq resource" (efct and ef10ct). I
    * think at the moment the latter is what we want, but this should be
    * revisited once we've built up more of the RX stuff. */
@@ -1435,7 +1433,7 @@ static enum efhw_page_map_type
 ef10ct_queue_map_type(struct efhw_nic *nic)
 {
   /* The test driver doesn't support DMA mapping, so fallback to phys addrs
-   * in that case. */
+   * in that case. TODO ON-16668 purge test driver */
   if( nic->devtype.variant == 'L' )
     return EFHW_PAGE_MAP_PHYS;
   else
@@ -1458,7 +1456,7 @@ static enum efhw_page_map_type
 ef10ct_buffer_map_type(struct efhw_nic *nic)
 {
   /* The test driver doesn't support DMA mapping, so fallback to phys addrs
-   * in that case. */
+   * in that case. TODO ON-16668 purge test driver */
   if( nic->devtype.variant == 'L' )
     return EFHW_PAGE_MAP_PHYS;
   else
@@ -1486,7 +1484,7 @@ static int get_rxq_num_from_mask(struct efhw_nic *nic,
 
   rc = ef10ct_alloc_rxq(nic);
 
-  /* FIXME EF10CT full lifetime management of this RXQ. We do the queue init
+  /* FIXME ON-16711 full lifetime management of this RXQ. We do the queue init
    * on demand on first attach, where we have information about the VI user
    * that we need to make decisions such as whether to enable RX event
    * generation and the target EVQ. The flush and release happen on queue
@@ -1934,6 +1932,7 @@ static int ef10ct_rxq_post_superbuf(struct efhw_nic *nic, int rxq_num,
                       EFCT_RX_BUFFER_POST_SENTINEL, sentinel,
                       EFCT_RX_BUFFER_POST_ROLLOVER, rollover);
 
+  /* TODO ON-16668 purge test driver */
   if ((nic->devtype.arch == EFHW_ARCH_EF10CT) &&
       (nic->devtype.variant == 'L'))
   {

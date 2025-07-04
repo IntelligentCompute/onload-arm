@@ -278,10 +278,12 @@ int efct_poll(void *driver_data, int qid, int budget)
 }
 
 /* net driver finished processing packets from the buffer,
- * check whether we can free the buffer */
+ * check whether we can free the buffer.
+ * 
+ * The force flag is not used by the net driver, and we don't take any
+ * special action if it is set. */
 int efct_buffer_end(void *driver_data, int qid, int sbid, bool force)
 {
-  /* TODO support force flag */
   struct efhw_nic_efct *efct = (struct efhw_nic_efct *) driver_data;
 
   struct efhw_nic_efct_rxq *q;
@@ -361,7 +363,7 @@ __efct_nic_rxq_bind(struct xlnx_efct_device* edev,
 
     /* Poison the start of each packet buffer with the appropriate value for
      * tcpdirect's packet header detection.
-     * EFCT TODO: rationalise other uses of poison (onload, and tcpdirect's
+     * TODO ON-16692 rationalise other uses of poison (onload, and tcpdirect's
      * partial-packet detection) so they all take the same value.
      */
     union xlnx_efct_param_value poison = {

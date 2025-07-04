@@ -12,7 +12,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <etherfabric/efct_vi.h>
-#include <etherfabric/memreg.h>
 #include <etherfabric/pd.h>
 #include <etherfabric/shrub_server.h>
 #include <etherfabric/shrub_shared.h>
@@ -41,7 +40,6 @@ struct shrub_controller_vi;
 static volatile sig_atomic_t is_running = 1;
 static volatile sig_atomic_t call_shrub_dump = 0;
 
-#define DEFAULT_BUFFER_COUNT 2048
 #define DEFAULT_BUFFER_SIZE 1024 * 1024
 
 #define EF_SHRUB_CONFIG_SOCKET_LOCK EF_SHRUB_NEGOTIATION_SOCKET "_lock"
@@ -54,7 +52,6 @@ struct shrub_controller_vi
   int n_ev;
   int i;
   ef_pd pd;
-  ef_memreg memreg; /* TODO will we want this? */
   ef_driver_handle dh;
 };
 
@@ -213,7 +210,7 @@ static int shrub_server_init(shrub_controller_config *config,
 {
   int rc;
   unsigned vi_flags = EF_VI_FLAGS_DEFAULT;
-  unsigned pd_flags = EF_PD_DEFAULT;
+  unsigned pd_flags = EF_PD_DEFAULT | EF_PD_EXPRESS;
   struct shrub_controller_vi *res = &interface_config->res;
 
   char server_path[EF_SHRUB_SERVER_SOCKET_LEN];
@@ -428,7 +425,7 @@ static int poll_socket(shrub_controller_config *config)
   int rc = 0;
   ssize_t recevied_bytes = 0;
   const int max_events = 1;
-  uint32_t buffer_count = DEFAULT_BUFFER_COUNT;
+  uint32_t buffer_count = EF_SHRUB_DEFAULT_BC;
   cicp_hwport_mask_t hwport_mask = 0xffffffff;
   shrub_controller_request_t request;
   int ifindex = -1;
@@ -464,7 +461,7 @@ static int poll_socket(shrub_controller_config *config)
           }
         response_status = SHRUB_ERR_INCOMPATIBLE_VERSION;
       } else {
-        buffer_count = DEFAULT_BUFFER_COUNT;
+        buffer_count = EF_SHRUB_DEFAULT_BC;
         hwport_mask = 0xffffffff;
         ifindex = -1;
 
@@ -599,9 +596,9 @@ int parse_interface(const char *arg, shrub_controller_config *config) {
     }
 
     buffer_count = atoi(buffer_str);
-    if ( buffer_count < EF_SHRUB_TEMP_BC ) {
-      ci_log("Error: shrub_controller invalid buffer size "
-        "must be at least %d.", EF_SHRUB_TEMP_BC);
+    if ( buffer_count < EF_SHRUB_DEFAULT_BC ) {
+      ci_log("Error: shrub_controller invalid buffer count "
+        "must be at least %d.", EF_SHRUB_DEFAULT_BC);
       return -EINVAL;
     }
   } else {
@@ -612,7 +609,7 @@ int parse_interface(const char *arg, shrub_controller_config *config) {
     }
 
     strcpy(iface, arg);
-    buffer_count = DEFAULT_BUFFER_COUNT;
+    buffer_count = EF_SHRUB_DEFAULT_BC;
   }
 
   ifindex = if_nametoindex(iface);

@@ -417,7 +417,7 @@ static void efct_grant_unsol_credit(ef_vi* vi, bool clear_overflow, uint32_t cre
 
 /* handle a tx completion event */
 static void efct_tx_handle_event(ef_vi* vi, ci_qword_t event, ef_event* ev_out,
-                                bool* again)
+                                 bool* again, ef_event** last_tx_event)
 {
   ef_vi_txq* q = &vi->vi_txq;
   ef_vi_txq_state* qs = &vi->ep_state->txq;
@@ -464,15 +464,36 @@ static void efct_tx_handle_event(ef_vi* vi, ci_qword_t event, ef_event* ev_out,
     ev_out->tx_timestamp.rq_id = q->ids[(qs->previous - 1) & q->mask];
     ev_out->tx_timestamp.flags = EF_EVENT_FLAG_CTPIO;
     ev_out->tx_timestamp.q_id = CI_QWORD_FIELD(event, EFCT_TX_EVENT_LABEL);
-    /* Delivering the tx event with timestamp counts as removing it, as we
-     * must only be delivering a single event, so _unbundle isn't used. */
-    qs->removed++;
 
+    /* Instead of removing these events now, we defer removal to the point in
+     * time where we unbundle the preceding normal TX event. As an example,
+     * consider the following flow of events where TX = normal transmit and
+     * TS = transmit with timestamp:
+     *
+     * 0  1  2  3  4  5   6      7  8   9
+     * TS TS TX TS TS TS  TX     TX TS  TX
+     * <--->    <------->    <->    <->    <->
+     *   2          3         0      1      0
+     *
+     * We can immediately (before returning from this poll) consume the first
+     * two TS events as no TX event exists before them in this poll. Subsequent
+     * TX events can then update the TXQ state to remove any TS events that are
+     * reported before the next TX event. In this example:
+     * - unbundling event (2) results in qs->removed += 3
+     * - unbundling event (6) results in qs->removed += 0
+     * - unbundling event (7) results in qs->removed += 1
+     * - unbundling event (9) results in qs->removed += 0
+     *
+     * These values are in addition to the number of unbundled packets.
+     */
+    (*last_tx_event)->tx.deferred_evs++;
   } else {
     ev_out->tx.type = EF_EVENT_TYPE_TX;
     ev_out->tx.desc_id = qs->previous;
     ev_out->tx.flags = EF_EVENT_FLAG_CTPIO;
     ev_out->tx.q_id = CI_QWORD_FIELD(event, EFCT_TX_EVENT_LABEL);
+    ev_out->tx.deferred_evs = 0;
+    *last_tx_event = ev_out;
   }
 }
 
@@ -722,13 +743,11 @@ static int efct_ef_vi_transmit_alt_discard(ef_vi* vi, unsigned alt_id)
 static int efct_ef_vi_receive_init(ef_vi* vi, ef_addr addr,
                                    ef_request_id dma_id)
 {
-  /* TODO X3 */
   return -ENOSYS;
 }
 
 static void efct_ef_vi_receive_push(ef_vi* vi)
 {
-  /* TODO X3 */
 }
 
 static int rx_rollover(ef_vi* vi, int qid)
@@ -765,7 +784,9 @@ static int rx_rollover(ef_vi* vi, int qid)
   }
   else {
     /* meta_pkt refers to the first packet of the new buffer,
-     * data_pkt remains in the previous buffer. */
+     * data_pkt remains in the previous buffer.
+     * store the final metadata packet id, to access the final timestamp */
+    efct_rx_desc(vi, rxq_ptr->data_pkt)->final_meta_pkt = meta_pkt;
   }
 
   rxq_ptr->meta_pkt =
@@ -873,7 +894,6 @@ static inline int efct_poll_rx(ef_vi* vi, int ix, ef_event* evs, int evs_len)
   qid = qs->efct_state[ix].qid;
   for( i = 0; i < evs_len; ++i ) {
     const ci_oword_t* header;
-    struct efct_rx_descriptor* desc;
     uint32_t pkt_id;
     uint16_t discard_flags = 0;
 
@@ -882,13 +902,13 @@ static inline int efct_poll_rx(ef_vi* vi, int ix, ef_event* evs, int evs_len)
       break;
 
     pkt_id = rxq_ptr->data_pkt;
-    desc = efct_rx_desc(vi, pkt_id);
 
     /* Do a coarse grained check first, then get rid of the false positives. */
     if(unlikely( header->u64[0] & CHECK_FIELDS ) &&
        (header->u64[0] & M(ROLLOVER) ||
         (discard_flags = header_status_flags(header) & vi->rx_discard_mask)) ) {
       if( CI_OWORD_FIELD(*header, EFCT_RX_HEADER_ROLLOVER) ) {
+        struct efct_rx_descriptor* desc = efct_rx_desc(vi, pkt_id);
         int prev_sb = pkt_id_to_local_superbuf_ix(pkt_id);
         int next_sb = pkt_id_to_local_superbuf_ix(rxq_ptr_to_pkt_id(rxq_ptr->meta_pkt));
         int nskipped;
@@ -941,13 +961,6 @@ static inline int efct_poll_rx(ef_vi* vi, int ix, ef_event* evs, int evs_len)
       evs[i].rx_ref.filter_id = CI_OWORD_FIELD(*header, EFCT_RX_HEADER_FILTER);
     }
 
-    /* This is only necessary for the final packet of each superbuf, storing
-     * metadata from the next superbuf, but it may be faster to do it
-     * unconditionally. */
-    desc->final_timestamp = CI_OWORD_FIELD(*header, EFCT_RX_HEADER_TIMESTAMP);
-    desc->final_ts_status = CI_OWORD_FIELD(*header,
-                                           EFCT_RX_HEADER_TIMESTAMP_STATUS);
-
     /* The following arithmetic assumes that the next data packet will be in
      * the same buffer as the next metadata. That won't be the case for the
      * first packet(s) in each buffer if the metadata offset is more than 1. */
@@ -973,6 +986,7 @@ static void efct_tx_handle_error_event(ef_vi* vi, ci_qword_t event,
   ev_out->tx_error.q_id = CI_QWORD_FIELD(event, EFCT_ERROR_LABEL);
   ev_out->tx_error.flags = 0;
   ev_out->tx_error.desc_id = ++qs->previous;
+  ev_out->tx_error.deferred_evs = 0;
   ev_out->tx_error.subtype = CI_QWORD_FIELD(event, EFCT_ERROR_REASON);
 }
 
@@ -1023,9 +1037,16 @@ static int efct_tx_handle_control_event(ef_vi* vi, ci_qword_t event,
 int efct_poll_tx(ef_vi* vi, ef_event* evs, int evs_len)
 {
   ef_eventq_state* evq = &vi->ep_state->evq;
+  ef_event* last_tx_event;
+  ef_event dummy_event;
   ci_qword_t* event;
   bool again = false;
   int n_evs = 0;
+
+  /* We need to track `deferred_evs`, but can't directly take a pointer to it
+   * as it's a bit field. */
+  dummy_event.tx.deferred_evs = 0;
+  last_tx_event = &dummy_event;
 
   /* Check for overflow. If the previous entry has been overwritten already,
    * then it will have the wrong phase value and will appear invalid */
@@ -1039,19 +1060,15 @@ int efct_poll_tx(ef_vi* vi, ef_event* evs, int evs_len)
 
     switch( CI_QWORD_FIELD(*event, EFCT_EVENT_TYPE) ) {
       case EFCT_EVENT_TYPE_TX:
-        efct_tx_handle_event(vi, *event, &evs[n_evs], &again);
+        efct_tx_handle_event(vi, *event, &evs[n_evs], &again, &last_tx_event);
         n_evs++;
         /* More than EF_VI_TRANSMIT_BATCH descriptors returned from HW event
          * we will complete rest on the next poll. Therefore, we move back
          * the evq_ptr.*/
         if(unlikely(again))
             evq->evq_ptr -= sizeof(*event);
-        /* Don't report more than one tx event per poll. This is to avoid a
-         * horrendous sequencing problem if a simple TX event is followed by a
-         * TX_WITH_TIMESTAMP; we'd need to update the queue state for the
-         * second event *after* the later call to ef_vi_transmit_unbundle()
-         * for the first event. */
-        return n_evs;
+
+        break;
       case EFCT_EVENT_TYPE_CONTROL:
         n_evs += efct_tx_handle_control_event(vi, *event, &evs[n_evs]);
         break;
@@ -1065,6 +1082,9 @@ int efct_poll_tx(ef_vi* vi, ef_event* evs, int evs_len)
         break;
     }
   }
+
+  /* If we had any leading TX with timestamp events, consume them now! */
+  vi->ep_state->txq.removed += dummy_event.tx.deferred_evs;
 
   return n_evs;
 }
@@ -1256,7 +1276,7 @@ efct_design_parameters(struct ef_vi* vi, struct efab_nic_design_parameters* dp)
   }
   vi->vi_txq.efct_aperture_mask = (GET(tx_aperture_bytes) - 1) >> 3;
 
-  /* FIXME EF10CT: We need proper handling of configurable size ctpio windows */
+  /* FIXME ON-15570: We need proper handling of configurable size ctpio windows */
   /* On EF10CT nics the size of the memory backing the CTPIO window is
    * configurable. This means that it is no longer sufficient to use the size
    * reported by the design parameters as the size for the actual queue. On
@@ -1308,7 +1328,7 @@ static int efct_post_filter_add(struct ef_vi* vi,
                                 bool shared_mode)
 {
 #ifdef __KERNEL__
-  return 0; /* EFCT TODO */
+  return -EOPNOTSUPP;
 #else
   int rc;
   unsigned n_superbufs;
@@ -1462,21 +1482,19 @@ int efct_vi_rxpkt_get_precise_timestamp(ef_vi* vi, uint32_t pkt_id,
                                         ef_precisetime* ts_out)
 {
   const struct efct_rx_descriptor* desc = efct_rx_desc(vi, pkt_id);
+  const ci_oword_t* header;
   uint64_t ts;
   unsigned status;
   int clock_set;
   int clock_in_sync;
 
-  if( pkt_id_to_index_in_superbuf(pkt_id) == desc->superbuf_pkts - 1 ) {
-    ts = desc->final_timestamp;
-    status = desc->final_ts_status;
-  }
-  else {
-    const ci_oword_t* header =
-      efct_rx_header(vi, pkt_id + vi->efct_rxqs.meta_offset);
-    ts = CI_OWORD_FIELD(*header, EFCT_RX_HEADER_TIMESTAMP);
-    status = CI_OWORD_FIELD(*header, EFCT_RX_HEADER_TIMESTAMP_STATUS);
-  }
+  pkt_id += vi->efct_rxqs.meta_offset;
+  if( pkt_id_to_index_in_superbuf(pkt_id) >= desc->superbuf_pkts )
+    pkt_id = desc->final_meta_pkt;
+
+  header = efct_rx_header(vi, pkt_id);
+  ts = CI_OWORD_FIELD(*header, EFCT_RX_HEADER_TIMESTAMP);
+  status = CI_OWORD_FIELD(*header, EFCT_RX_HEADER_TIMESTAMP_STATUS);
 
   if( status == 0 )
     return -ENODATA;

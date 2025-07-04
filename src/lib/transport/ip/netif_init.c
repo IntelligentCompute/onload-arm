@@ -1972,7 +1972,7 @@ static void oo_efct_superbuf_post_ioctl(ef_vi* vi, int qid, int sbid,
   op.sbid = sbid;
   op.sentinel = sentinel;
   oo_resource_op(vi->dh, OO_IOC_EFCT_SUPERBUF_POST, &op);
-  // FIXME should we detect errors?
+  // TODO ON-16698 should we detect errors?
 }
 
 static int map_efct_ubuf_rxq_io_windows(ef_vi* vi, int intf_i)
@@ -2106,7 +2106,7 @@ static int oo_init_shrub(ci_netif* ni, ef_vi* vi, ci_hwport_id_t hw_port, int ni
         oo_send_shrub_request,
         NI_OPTS(ni).shrub_controller_id,
         hw_port,
-        EF_SHRUB_TEMP_BC
+        EF_SHRUB_DEFAULT_BC
       );
       if ( shrub_socket_id < 0 ) {
         rc = shrub_socket_id;
@@ -2172,9 +2172,6 @@ static int init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
 
       if( vi->vi_flags & EF_VI_RX_PHYS_ADDR ) {
         map_efct_ubuf_rxq_io_windows(vi, nic_i);
-        /* TODO: directly post superbufs when onload kernel allocated bufs have
-         * been mapped (ON-16320). */
-        vi->efct_rxqs.ops->post = oo_efct_superbuf_post_ioctl;
       } else {
         vi->efct_rxqs.ops->post = oo_efct_superbuf_post_ioctl;
       }

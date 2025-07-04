@@ -2681,7 +2681,7 @@ ci_inline int ci_netif_has_many_events(ci_netif* ni, int lookahead) {
  * can do about that. It would not cause a functional problem in any case.
  *
  * For EFCT, this must match the value provided to the driver in
- * efct_nic_rxq_bind. TODO EFCT centralise the definition of this value.
+ * efct_nic_rxq_bind. TODO ON-16692 centralise the definition of this value.
  */
 #define CI_PKT_RX_POISON 0xFFA0C09Bu
 ci_inline volatile uint32_t* ci_netif_poison_location(ci_ip_pkt_fmt* pkt)
@@ -2740,7 +2740,7 @@ ci_netif_intf_rx_future(ci_netif* ni, int intf_i, const uint32_t* poison)
     return poison;
 
   vi = ci_netif_vi(ni, intf_i);
-  /* TODO less clumsy check for EFCT datapath */
+  /* TODO ON-16495 less clumsy check for EFCT datapath */
   if( vi->nic_type.arch == EF_VI_ARCH_EFCT ||
       vi->nic_type.arch == EF_VI_ARCH_EF10CT) {
     volatile const uint32_t* p = efct_vi_rx_future_peek(vi);

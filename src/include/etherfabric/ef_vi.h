@@ -172,6 +172,7 @@ typedef union {
     unsigned       flags        :(8 - EF_VI_TX_TS_FRAC_NS_BITS);
     unsigned       __reserved   :EF_VI_TX_TS_FRAC_NS_BITS;
     unsigned       desc_id      :16;
+    unsigned       deferred_evs :16;
   } tx;
   /** An event of type EF_EVENT_TYPE_TX_ERROR */
   struct {  /* This *must* have same layout as [tx]. */
@@ -180,6 +181,7 @@ typedef union {
     unsigned       flags        :(8 - EF_VI_TX_TS_FRAC_NS_BITS);
     unsigned       __reserved   :EF_VI_TX_TS_FRAC_NS_BITS;
     unsigned       desc_id      :16;
+    unsigned       deferred_evs :16;
     unsigned       subtype      :16;
   } tx_error;
   /** An event of type EF_EVENT_TYPE_TX_WITH_TIMESTAMP */
@@ -871,8 +873,6 @@ typedef struct {
   const char* superbuf;
   const void* mappings;
 #endif
-  /* FIXME EF10CT to be removed */
-  ef_addr* dma_addrs;
 } ef_vi_efct_rxq;
 
 typedef void (*ef_vi_dump_log_fn_t)(void* log_fn_arg, const char* fmt, ...)
@@ -936,7 +936,7 @@ typedef struct {
   uint16_t rx_stride;
 
   /** efct kernel/userspace shared queue area. Exposed for debugging.
-   ** TODO provide generic access to stats and hide this */
+   ** TODO ON-15253 provide generic access to stats and hide this */
   const struct efab_efct_rxq_uk_shm_base* shm;
 } ef_vi_efct_rxqs;
 
@@ -1065,8 +1065,6 @@ typedef struct ef_vi {
   unsigned                      vi_i;
   /** fd used for original initialisation */
   ef_driver_handle              dh;
-  /* FIXME EF10CT, this doesn't belong here */
-  int owner_id;
 
   /** The length of a receive buffer */
   unsigned                      rx_buffer_len;

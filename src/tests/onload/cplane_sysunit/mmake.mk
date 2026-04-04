@@ -36,7 +36,10 @@ $(SHIM_OBJS): MMAKE_CFLAGS += -I$(TOPPATH)/$(CURRENT)/$(CP_SERVER_SRC_DIR)
 CP_CLIENT_LIB_SRC_DIR := ../../../lib/cplane
 CP_CLIENT_LIB_OBJ_DIR := cp_client_lib
 SHIM_EFCP_OBJS := $(addprefix $(CP_CLIENT_LIB_OBJ_DIR)/,uapi_top.o uapi_llap.o uapi_resolve.o)
+# BMI2 instructions only available on x86_64
+ifeq ($(MMAKE_MK_PLATFORM),gnu_x86_64)
 $(CP_CLIENT_LIB_OBJ_DIR)/uapi_resolve.o: MMAKE_CFLAGS+=-mbmi2
+endif
 
 # This defines CLIENT_LIB_OBJS, which lists object files for the control plane
 # itself.

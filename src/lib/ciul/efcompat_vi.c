@@ -17,7 +17,20 @@
 #include <ci/tools/sysdep.h>
 #include <ci/net/ethernet.h>
 #include <stdlib.h>
+
+/* Architecture-specific SSE/SIMD headers */
+#if defined(__x86_64__) || defined(__i386__)
 #include <emmintrin.h>
+#elif defined(__aarch64__) || defined(__arm__)
+#include "sse2neon.h"
+#elif defined(__powerpc64__) || defined(__ppc64__)
+/* PPC64 can use Altivec/VSX, but for now we'll handle without SIMD */
+/* Future enhancement: could include <altivec.h> and provide PPC translations */
+#else
+/* Other architectures: disable SIMD optimizations */
+#warning "SSE/SIMD optimizations not available on this architecture"
+#endif
+
 #include <linux/ipv6.h>
 #include <string.h>
 

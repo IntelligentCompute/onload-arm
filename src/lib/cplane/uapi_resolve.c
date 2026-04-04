@@ -5,7 +5,26 @@
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <endian.h>
+#if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
+#endif
+
+#if !defined(__x86_64__) && !defined(__i386__)
+/* ARM64/other architectures don't have _pdep_u32, provide fallback implementation */
+static inline uint32_t _pdep_u32(uint32_t src, uint32_t mask) {
+  uint32_t result = 0;
+  uint32_t bb = 1;
+  for (uint32_t i = 0; i < 32; i++) {
+    if (mask & (1u << i)) {
+      if (src & bb) {
+        result |= (1u << i);
+      }
+      bb <<= 1;
+    }
+  }
+  return result;
+}
+#endif
 
 #define VLAN_HLEN 4
 

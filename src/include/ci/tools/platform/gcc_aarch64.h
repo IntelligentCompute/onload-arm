@@ -161,6 +161,11 @@ ci_inline void ci_atomic_or(ci_atomic_t* a, int v)
    __sync_fetch_and_or(&a->n, v);
 }
 
+ci_inline void ci_atomic_add(ci_atomic_t* a, int v)
+{
+  __sync_fetch_and_add(&a->n, v);
+}
+
 ci_inline int ci_atomic_xadd(ci_atomic_t* a, int v)
 {
   return __sync_fetch_and_add(&a->n, v);
@@ -317,7 +322,7 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
 }
 
 
-# define ci_spinloop_pause()  do{}while(0)
+# define ci_spinloop_pause()  __asm__ __volatile__("yield")
 
 #define CI_HAVE_ADDC32
 #define ci_add_carry32(sum, v)                          \
@@ -328,8 +333,7 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
   } while(0)
 
 
-/* TODO */
-#define ci_prefetch(addr)      do{}while(0)
+#define ci_prefetch(addr)      __builtin_prefetch(addr)
 #define ci_prefetch_ppc(addr)  do{}while(0)
 
 

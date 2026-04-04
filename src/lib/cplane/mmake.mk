@@ -25,7 +25,10 @@ $(LIB_OBJS): $(CP_INTF_VER_HDR)
 $(CPLANE_LIB): $(LIB_OBJS)
 	$(MMakeLinkStaticLib)
 
+# BMI2 instructions only available on x86_64
+ifeq ($(MMAKE_MK_PLATFORM),gnu_x86_64)
 uapi_resolve.o: MMAKE_CFLAGS+=-mbmi2
+endif
 $(UAPI_LIB_OBJS) : $(CP_INTF_VER_HDR)
 $(CPLANE_API_SHARED_REALNAME): $(UAPI_LIB_OBJS) $(CPLANE_LIB)
 	@(soname="$(CPLANE_API_SHARED_SONAME)" libs="$(LINK_CPLANE_LIB) $(LINK_CITOOLS_LIB)"; $(MMakeLinkDynamicLib))

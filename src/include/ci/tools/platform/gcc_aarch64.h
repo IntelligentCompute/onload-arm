@@ -161,6 +161,11 @@ ci_inline void ci_atomic_or(ci_atomic_t* a, int v)
    __sync_fetch_and_or(&a->n, v);
 }
 
+ci_inline void ci_atomic_add(ci_atomic_t* a, int v)
+{
+   __sync_fetch_and_add(&a->n, v);
+}
+
 ci_inline int ci_atomic_xadd(ci_atomic_t* a, int v)
 {
   return __sync_fetch_and_add(&a->n, v);

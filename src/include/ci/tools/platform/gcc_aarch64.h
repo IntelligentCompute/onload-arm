@@ -245,57 +245,25 @@ typedef ci_uint32  ci_bits;
 ci_inline void ci_bits_clear_all(volatile ci_bits* b, int n_bits)
 { memset((void*) b, 0, (n_bits+CI_BITS_N-1u) / CI_BITS_N * sizeof(ci_bits)); }
 
-ci_inline void ci_bit_set(volatile ci_bits* bits, int i)
-{
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = 1 << ( i & 31 );
-  do {
-    old = b[i>>5];
-    new = old | mask;
-  } while (ci_cas32(b, old, new) != old);
-}
+ci_inline void ci_bit_set(volatile ci_bits* b, int i)
+{ __sync_fetch_and_or(&b[i >> 5], 1u << (i & 31)); }
 
-ci_inline void ci_bit_clear(volatile ci_bits* bits, int i)
-{
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = ~(1 << ( i & 31 ));
-  do {
-    old = b[i>>5];
-    new = old & mask;
-  } while (ci_cas32(b, old, new) != old);
-}
+ci_inline void ci_bit_clear(volatile ci_bits* b, int i)
+{ __sync_fetch_and_and(&b[i >> 5], ~(1u << (i & 31))); }
 
 ci_inline int ci_bit_test(volatile ci_bits* b, int i)
-{ return b[i >> 5] & (1<<(i & 31)); }
+{ return (b[i >> 5] & (1u << (i & 31))) != 0; }
 
-ci_inline int ci_bit_test_and_set(volatile ci_bits *bits, int i)
+ci_inline int ci_bit_test_and_set(volatile ci_bits* b, int i)
 {
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = 1 << ( i & 31 );
-  do {
-    old = b[i>>5];
-    new = old | mask;
-  } while (ci_cas32(b, old, new) != old);
-  return (old & mask) != 0;
+  ci_bits mask = 1u << (i & 31);
+  return (__sync_fetch_and_or(&b[i >> 5], mask) & mask) != 0;
 }
 
-ci_inline int ci_bit_test_and_clear(volatile ci_bits *bits, int i)
+ci_inline int ci_bit_test_and_clear(volatile ci_bits* b, int i)
 {
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = ~(1 << ( i & 31 ));
-  do {
-    old = b[i>>5];
-    new = old & mask;
-  } while (ci_cas32(b, old, new) != old);
-  return (old & ~mask) != 0;
+  ci_bits mask = 1u << (i & 31);
+  return (__sync_fetch_and_and(&b[i >> 5], ~mask) & mask) != 0;
 }
 
 #define ci_bit_mask_set(b,m)    ci_atomic32_or((b), (m))

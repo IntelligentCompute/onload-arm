@@ -321,7 +321,8 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
 }
 
 
-# define ci_spinloop_pause()  do{}while(0)
+/* As the kernel's cpu_relax() */
+# define ci_spinloop_pause()  __asm__ __volatile__("yield" ::: "memory")
 
 #define CI_HAVE_ADDC32
 #define ci_add_carry32(sum, v)                          \
@@ -332,8 +333,7 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
   } while(0)
 
 
-/* TODO */
-#define ci_prefetch(addr)      do{}while(0)
+#define ci_prefetch            __builtin_prefetch
 #define ci_prefetch_ppc(addr)  do{}while(0)
 
 

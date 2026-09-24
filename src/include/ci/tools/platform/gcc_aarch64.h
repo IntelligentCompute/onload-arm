@@ -269,6 +269,42 @@ ci_inline int ci_bit_test_and_clear(volatile ci_bits* b, int i)
 #define ci_bit_mask_set(b,m)    ci_atomic32_or((b), (m))
 #define ci_bit_mask_clear(b,m)  ci_atomic32_and((b), ~(m))
 
+/* Non-atomic versions, for when the caller has exclusive access. */
+ci_inline void __ci_bit_set(volatile ci_bits* b, int i)
+{ b[i >> 5] |= 1u << (i & 31); }
+
+ci_inline void __ci_bit_clear(volatile ci_bits* b, int i)
+{ b[i >> 5] &= ~(1u << (i & 31)); }
+
+ci_inline int ci_bit_find_next(const ci_bits* a, int sz, int from)
+{
+  const int bits_per_unit = sizeof(*a) * 8;
+  const int unit_mask = bits_per_unit - 1;
+  const ci_bits *ptr;
+  ci_bits x;
+
+  if (from >= sz)
+    return sz;
+  ptr = &a[from / bits_per_unit];
+  x = *ptr & -((ci_bits)1 << (from & unit_mask));
+
+  from &= ~unit_mask;
+  while (!x) {
+    from += bits_per_unit;
+    if (from >= sz)
+      return sz;
+    x = *++ptr;
+  }
+  return from + __builtin_ctz(x);
+}
+
+#define ci_bit_find_first(a, sz) ci_bit_find_next(a, sz, 0)
+
+#define ci_bit_for_each_set(bit, addr, size) \
+	for ((bit) = ci_bit_find_first((addr), (size));		\
+	     (bit) < (size);					\
+	     (bit) = ci_bit_find_next((addr), (size), (bit) + 1))
+
 /**********************************************************************
  * Misc.
  */

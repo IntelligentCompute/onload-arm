@@ -67,12 +67,16 @@
 # If you want to fail the OpenOnload build if either AUX or EFCT
 # is unavailable at build time:
 #    --define "have_efct 1"
+#
+# If you want to build Onload with support for SDCI add:
+#    --define "have_sdci 1"
 
 %bcond_without user # add option to skip userland package
 %bcond_without kmod # add option to skip kmod package
 %bcond_without devel # add option to skip devel package
 %bcond_without akmod # add option to skip Akmods package
 %bcond_without dkms # add option to skip DKMS package
+%bcond_without examples # add option to skip examples package
 
 %define pkgversion 20100910
 
@@ -385,7 +389,8 @@ export HAVE_EFCT=%{?have_efct:%have_efct}
   %{?build_profile:--build-profile %build_profile} \
   %{?debug:--debug} \
   %{?with_user: --user64} \
-  %{?with_kmod: --kernel --kernelver "%{kernel}"}
+  %{?with_kmod: --kernel --kernelver "%{kernel}"} \
+  %{?have_sdci: --have-sdci}
 %else
 %if %{with devel}
 # Satisfy onload_install sanity check
@@ -394,7 +399,7 @@ mkdir build
 %endif
 
 %install
-%if %{with user}%{with kmod}%{with devel}
+%if %{with user}%{with kmod}%{with devel}%{with examples}
 export i_prefix=%{buildroot}
 mkdir -p "$i_prefix/etc/modprobe.d"
 mkdir -p "$i_prefix/etc/depmod.d"
@@ -403,7 +408,9 @@ mkdir -p "$i_prefix/etc/depmod.d"
   %{?debug:--debug} %{?setuid:--setuid} %{?moddir:--moddir=%moddir} \
   %{?with_user: --userfiles --modprobe --modulesloadd --udev %{?_sysusersdir:--adduser}} \
   %{?with_kmod: --kernelfiles --kernelver "%{kernel}"} \
-  %{?with_devel: --headers}
+  %{?with_devel: --headers} \
+  %{?with_examples: --examples} \
+  %{?have_sdci: --have-sdci}
 %endif
 %if %{with user}
 # Removing these files is fine since they would only ever be generated on a build machine.
@@ -421,10 +428,14 @@ sed \
   -e "/bcond_without devel/ {s/without/with/; s/skip/include/}" \
   -e "/bcond_without akmod/ {s/without/with/; s/skip/include/}" \
   -e "/bcond_without dkms/ {s/without/with/; s/skip/include/}" \
+  -e "/bcond_without examples/ {s/without/with/; s/skip/include/}" \
   -e "/bcond_with kernel_package_deps/ {s/with/without/; s/include/skip/}" \
   -e '/define "moddir extra"/ s/.*/%%global moddir extra\/onload/' \
   %{?debug:-e '/define "debug true"/ s/.*/%%global debug true/'} \
   %{?setuid:-e '/define "setuid true"/ s/.*/%%global setuid true/'} \
+  %{?have_sdci:-e '/define "have_sdci 1"/ s/.*/%%global have_sdci %have_sdci/'} \
+  %{?build_profile:-e '/define "build_profile/ s/.*/%%global build_profile %build_profile/'} \
+  %{?have_efct:-e '/define "have_efct 1"/ s/.*/%%global have_efct %have_efct/'} \
   "%{_specdir}/openonload.spec" > %{_specdir}/%{name}-akmod.spec
 # Based on output of `kmodtool --akmod`
 mkdir -p %{buildroot}/%{_usrsrc}/akmods/
@@ -436,8 +447,7 @@ rpmbuild \
 ln -s $(ls %{buildroot}/%{_usrsrc}/akmods/) %{buildroot}/%{_usrsrc}/akmods/%{name}-kmod.latest
 %endif
 %if %{with dkms}
-echo "MAKE[0]+=\"%{?debug: --debug}%{?build_profile: --build-profile %build_profile}%{?moddir: --moddir=%moddir}\"" > dkms_overrides.conf
-%{!?with_user:echo "which onload_uninstall >/dev/null 2>&1 || MAKE[0]+=\" --userfiles --modprobe --modulesloadd --udev --adduser%{?setuid: --setuid}\"" >> dkms_overrides.conf}
+echo "MAKE[0]+=\"%{?debug: --debug}%{?build_profile: --build-profile %build_profile}%{?moddir: --moddir=%moddir}%{?have_sdci: --have-sdci}\"" > dkms_overrides.conf
 install -D -m 644 dkms_overrides.conf %{buildroot}%{_sysconfdir}/dkms/%{name}.conf
 mkdir -p %{buildroot}%{_usrsrc}
 tar xf %{SOURCE0} -C %{buildroot}%{_usrsrc}

@@ -494,7 +494,7 @@ static inline int efrm_follow_pfn(struct vm_area_struct *vma,
 #elif defined(EFRM_HAVE_FOLLOW_PTE)
 /* exported in linux 5.10+ */
 
-#if defined(EFRM_HAVE_FOLLOW_PTE_VMA) || LINUX_VERSION_CODE >= KERNEL_VERSION(6,10,0)
+#ifdef EFRM_HAVE_FOLLOW_PTE_VMA
 /* linux >= 6.10 */
 #define efrm_follow_pte follow_pte
 #else

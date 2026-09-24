@@ -62,8 +62,7 @@ static inline struct file *ci_get_file_rcu(struct file **f)
 #endif
 
 /* is_compat_task() was removed for x86 in linux-4.6 */
-#if defined(EFRM_NEED_IS_COMPAT_TASK) && !defined(CONFIG_ARM64)
-/* ARM64 kernels provide is_compat_task(), only define for other archs */
+#ifdef EFRM_NEED_IS_COMPAT_TASK
 static inline int is_compat_task(void)
 {
 #if !defined(CONFIG_COMPAT)
@@ -154,8 +153,8 @@ oo_copy_file_owner(struct file *file_to, struct file *file_from)
   return 0;
 }
 
-#if defined(EFRM_CLOEXEC_FILES_STRUCT) || LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,0)
-/* linux 6.11+ - close_on_exec takes files_struct directly */
+#ifdef EFRM_CLOEXEC_FILES_STRUCT
+/* linux 6.12+ */
 #define efrm_close_on_exec close_on_exec
 #else
 static inline bool efrm_close_on_exec(unsigned int fd,
@@ -163,7 +162,7 @@ static inline bool efrm_close_on_exec(unsigned int fd,
 {
 	return close_on_exec(fd, files_fdtable(files));
 }
-#endif /* EFRM_CLOEXEC_FILES_STRUCT || kernel >= 6.11 */
+#endif
 
 #ifdef EFRM_HAVE_TIMER_DELETE_SYNC
 /* linux 6.1+ */

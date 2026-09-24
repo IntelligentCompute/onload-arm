@@ -343,7 +343,6 @@ cmd_reload() {
   [ "$1" = "--onload-only" ] && onload_only="1" && shift
   [ $# = 0 ] || usage
   do_unload ${onload_only} || fail "ERROR: could not unload all drivers"
-
   if [ ${onload_only} != "1" ]; then
     # After v5_2_1_1003 net driver version, Onload module doesn't depend on sfc
     # module, so need to load sfc driver separately

@@ -16,6 +16,8 @@
 #ifndef __CI_COMPAT_GCC_AARCH64_H__
 #define __CI_COMPAT_GCC_AARCH64_H__
 
+/* ARM64 TODO review these */
+
 /*
    Barriers to enforce ordering with respect to:
    normal memory use: ci_wmb, ci_rmb, ci_wmb

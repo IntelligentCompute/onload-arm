@@ -10,9 +10,6 @@
 #include <linux/moduleparam.h>
 #include <linux/log2.h>
 #include <linux/highuid.h>
-#ifdef CONFIG_COMPAT
-#include <linux/compat.h>
-#endif
 #include <net/neighbour.h>
 #include <net/arp.h>
 #include <net/route.h>

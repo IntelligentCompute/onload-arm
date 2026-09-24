@@ -237,10 +237,14 @@ int func(unsigned long v, volatile unsigned long *ptr)
 "
 }
 
+# The prototype is needed to avoid -Wmissing-prototypes (on by default since
+# linux-6.8) failing the compile under -Werror where is_compat_task() is
+# available, e.g. on arm64 or when CONFIG_COMPAT is not set.
 function do_EFRM_NEED_IS_COMPAT_TASK
 {
     defer_test_compile neg "
 #include <linux/compat.h>
+int test(void);
 int test(void) { return is_compat_task(); }
 "
 }

@@ -17,7 +17,9 @@
 #include <ci/tools/sysdep.h>
 #include <ci/net/ethernet.h>
 #include <stdlib.h>
+#if defined(__x86_64__) || defined(__i386__)
 #include <emmintrin.h>
+#endif
 #include <linux/ipv6.h>
 #include <string.h>
 

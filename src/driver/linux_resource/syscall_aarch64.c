@@ -42,9 +42,10 @@ static typeof(aarch64_insn_adrp_get_offset) *ci_aarch64_insn_adrp_get_offset;
     }                                                \
   } while (0);
 
-/* Linux does not have any function to check for 'bti' instruction. So we
- * define it by ourselves. */
-static inline bool aarch64_insn_is_bti(u32 code)
+/* Linux < 6.3 does not have any function to check for 'bti' instruction, and
+ * later kernels define aarch64_insn_is_bti() in asm/insn.h. So we define our
+ * own, with the "ci" prefix to avoid clashing with the kernel's version. */
+static inline bool ci_aarch64_insn_is_bti(u32 code)
 {
   u32 mask = 0xFFFFFF3F;
   u32 val = 0xD503241F;
@@ -260,7 +261,7 @@ find_el_svc_entry(void)
   while (1) {
     CI_AARCH64_INSN_READ(el_sync, insn);
     /* Skip 'bti' instructions, which may be between 'bl's. */
-    if (aarch64_insn_is_bti(insn)) {
+    if (ci_aarch64_insn_is_bti(insn)) {
       el_sync += AARCH64_INSN_SIZE;
       continue;
     }

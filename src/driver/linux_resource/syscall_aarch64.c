@@ -5,6 +5,9 @@
 #include <ci/efrm/sysdep_linux.h>
 #include <ci/efrm/debug_linux.h>
 #include <ci/efrm/syscall.h>
+#include <linux/kallsyms.h>
+#include <linux/kprobes.h>
+#include <linux/moduleparam.h>
 
 #if 1
 #define TRAMP_DEBUG(x...) (void)0
@@ -14,6 +17,20 @@
 
 void** efrm_syscall_table = NULL;
 EXPORT_SYMBOL(efrm_syscall_table);
+
+/* The syscall table is normally found automatically, see
+ * find_syscall_table().  Where that is not possible its address may be given
+ * explicitly, e.g. as read from /proc/kallsyms.  It is not exposed in sysfs,
+ * as it would reveal the kernel's address to unprivileged users, and setting
+ * it taints the kernel if we cannot check it. */
+static unsigned long syscall_table_addr;
+#ifdef CONFIG_KALLSYMS_ALL
+module_param(syscall_table_addr, ulong, 0);
+#else
+module_param_unsafe(syscall_table_addr, ulong, 0);
+#endif
+MODULE_PARM_DESC(syscall_table_addr,
+                 "Address of sys_call_table, overriding the automatic lookup");
 
 
 /* The kernel contains some neat routines for doing AArch64 code inspection.
@@ -42,9 +59,10 @@ static typeof(aarch64_insn_adrp_get_offset) *ci_aarch64_insn_adrp_get_offset;
     }                                                \
   } while (0);
 
-/* Linux does not have any function to check for 'bti' instruction. So we
- * define it by ourselves. */
-static inline bool aarch64_insn_is_bti(u32 code)
+/* Linux < 6.3 does not have any function to check for 'bti' instruction, and
+ * later kernels define aarch64_insn_is_bti() in asm/insn.h. So we define our
+ * own, with the "ci" prefix to avoid clashing with the kernel's version. */
+static inline bool ci_aarch64_insn_is_bti(u32 code)
 {
   u32 mask = 0xFFFFFF3F;
   u32 val = 0xD503241F;
@@ -260,7 +278,7 @@ find_el_svc_entry(void)
   while (1) {
     CI_AARCH64_INSN_READ(el_sync, insn);
     /* Skip 'bti' instructions, which may be between 'bl's. */
-    if (aarch64_insn_is_bti(insn)) {
+    if (ci_aarch64_insn_is_bti(insn)) {
       el_sync += AARCH64_INSN_SIZE;
       continue;
     }
@@ -410,12 +428,65 @@ find_syscall_table_via_vbar(void)
   return CI_PTR_ALIGN_BACK(el_svc, SZ_4K) + ci_aarch64_insn_adrp_get_offset(insn);
 }
 
+static void *find_syscall_table_from_param(void)
+{
+#ifdef CONFIG_KALLSYMS_ALL
+  char sym[KSYM_SYMBOL_LEN];
+#endif
+
+  if (syscall_table_addr == 0)
+    return NULL;
+
+#ifdef CONFIG_KALLSYMS_ALL
+  /* Don't read syscall pointers from, and call through, arbitrary kernel
+   * memory if given a bad address. */
+  sprint_symbol(sym, syscall_table_addr);
+  if (!strstarts(sym, "sys_call_table+0x0/")) {
+    EFRM_ERR("%s: ignoring syscall_table_addr: it is %s, not sys_call_table",
+             __func__, sym);
+    return NULL;
+  }
+#endif
+
+  EFRM_NOTICE("%s: using sys_call_table address from module parameter",
+              __func__);
+  return (void*) syscall_table_addr;
+}
+
+#if ! defined(EFRM_HAVE_NEW_KALLSYMS) && defined(CONFIG_KPROBES)
+/* Newer kernels export neither kallsyms_lookup_name() (since linux-5.7) nor
+ * kallsyms_on_each_symbol(), so efrm_find_ksym() is not available.  However
+ * registering a kprobe resolves a symbol name, which gets us the address of
+ * kallsyms_lookup_name() itself.  The kprobe is never armed. */
+static void *find_ksym_via_kprobe(const char *name)
+{
+  struct kprobe kp = {
+    .symbol_name = "kallsyms_lookup_name",
+    .flags = KPROBE_FLAG_DISABLED,
+  };
+  unsigned long (*lookup_name)(const char *name);
+
+  if (register_kprobe(&kp) < 0)
+    return NULL;
+  lookup_name = (void*) kp.addr;
+  unregister_kprobe(&kp);
+
+  return lookup_name != NULL ? (void*) lookup_name(name) : NULL;
+}
+#endif
+
 static void *find_syscall_table(void)
 {
   void *syscalls = NULL;
 
+  syscalls = find_syscall_table_from_param();
+  if (syscalls != NULL)
+    return syscalls;
+
 #ifdef EFRM_HAVE_NEW_KALLSYMS
   syscalls = efrm_find_ksym("sys_call_table");
+#elif defined(CONFIG_KPROBES)
+  syscalls = find_ksym_via_kprobe("sys_call_table");
 #endif
   if (syscalls != NULL)
     return syscalls;

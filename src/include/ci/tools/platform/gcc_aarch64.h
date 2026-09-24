@@ -161,6 +161,11 @@ ci_inline void ci_atomic_or(ci_atomic_t* a, int v)
    __sync_fetch_and_or(&a->n, v);
 }
 
+ci_inline void ci_atomic_add(ci_atomic_t* a, int v)
+{
+   __sync_fetch_and_add(&a->n, v);
+}
+
 ci_inline int ci_atomic_xadd(ci_atomic_t* a, int v)
 {
   return __sync_fetch_and_add(&a->n, v);
@@ -245,61 +250,65 @@ typedef ci_uint32  ci_bits;
 ci_inline void ci_bits_clear_all(volatile ci_bits* b, int n_bits)
 { memset((void*) b, 0, (n_bits+CI_BITS_N-1u) / CI_BITS_N * sizeof(ci_bits)); }
 
-ci_inline void ci_bit_set(volatile ci_bits* bits, int i)
-{
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = 1 << ( i & 31 );
-  do {
-    old = b[i>>5];
-    new = old | mask;
-  } while (ci_cas32(b, old, new) != old);
-}
+ci_inline void ci_bit_set(volatile ci_bits* b, int i)
+{ __sync_fetch_and_or(&b[i >> 5], 1u << (i & 31)); }
 
-ci_inline void ci_bit_clear(volatile ci_bits* bits, int i)
-{
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = ~(1 << ( i & 31 ));
-  do {
-    old = b[i>>5];
-    new = old & mask;
-  } while (ci_cas32(b, old, new) != old);
-}
+ci_inline void ci_bit_clear(volatile ci_bits* b, int i)
+{ __sync_fetch_and_and(&b[i >> 5], ~(1u << (i & 31))); }
 
 ci_inline int ci_bit_test(volatile ci_bits* b, int i)
-{ return b[i >> 5] & (1<<(i & 31)); }
+{ return (b[i >> 5] & (1u << (i & 31))) != 0; }
 
-ci_inline int ci_bit_test_and_set(volatile ci_bits *bits, int i)
+ci_inline int ci_bit_test_and_set(volatile ci_bits* b, int i)
 {
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = 1 << ( i & 31 );
-  do {
-    old = b[i>>5];
-    new = old | mask;
-  } while (ci_cas32(b, old, new) != old);
-  return (old & mask) != 0;
+  ci_bits mask = 1u << (i & 31);
+  return (__sync_fetch_and_or(&b[i >> 5], mask) & mask) != 0;
 }
 
-ci_inline int ci_bit_test_and_clear(volatile ci_bits *bits, int i)
+ci_inline int ci_bit_test_and_clear(volatile ci_bits* b, int i)
 {
-  // arm64 force type
-  volatile ci_int32 *b = (volatile ci_int32 *)bits;
-  ci_int32 mask, old, new;
-  mask = ~(1 << ( i & 31 ));
-  do {
-    old = b[i>>5];
-    new = old & mask;
-  } while (ci_cas32(b, old, new) != old);
-  return (old & ~mask) != 0;
+  ci_bits mask = 1u << (i & 31);
+  return (__sync_fetch_and_and(&b[i >> 5], ~mask) & mask) != 0;
 }
 
 #define ci_bit_mask_set(b,m)    ci_atomic32_or((b), (m))
 #define ci_bit_mask_clear(b,m)  ci_atomic32_and((b), ~(m))
+
+/* Non-atomic versions, for when the caller has exclusive access. */
+ci_inline void __ci_bit_set(volatile ci_bits* b, int i)
+{ b[i >> 5] |= 1u << (i & 31); }
+
+ci_inline void __ci_bit_clear(volatile ci_bits* b, int i)
+{ b[i >> 5] &= ~(1u << (i & 31)); }
+
+ci_inline int ci_bit_find_next(const ci_bits* a, int sz, int from)
+{
+  const int bits_per_unit = sizeof(*a) * 8;
+  const int unit_mask = bits_per_unit - 1;
+  const ci_bits *ptr;
+  ci_bits x;
+
+  if (from >= sz)
+    return sz;
+  ptr = &a[from / bits_per_unit];
+  x = *ptr & -((ci_bits)1 << (from & unit_mask));
+
+  from &= ~unit_mask;
+  while (!x) {
+    from += bits_per_unit;
+    if (from >= sz)
+      return sz;
+    x = *++ptr;
+  }
+  return from + __builtin_ctz(x);
+}
+
+#define ci_bit_find_first(a, sz) ci_bit_find_next(a, sz, 0)
+
+#define ci_bit_for_each_set(bit, addr, size) \
+	for ((bit) = ci_bit_find_first((addr), (size));		\
+	     (bit) < (size);					\
+	     (bit) = ci_bit_find_next((addr), (size), (bit) + 1))
 
 /**********************************************************************
  * Misc.
@@ -317,7 +326,8 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
 }
 
 
-# define ci_spinloop_pause()  do{}while(0)
+/* As the kernel's cpu_relax() */
+# define ci_spinloop_pause()  __asm__ __volatile__("yield" ::: "memory")
 
 #define CI_HAVE_ADDC32
 #define ci_add_carry32(sum, v)                          \
@@ -328,8 +338,7 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
   } while(0)
 
 
-/* TODO */
-#define ci_prefetch(addr)      do{}while(0)
+#define ci_prefetch            __builtin_prefetch
 #define ci_prefetch_ppc(addr)  do{}while(0)
 
 

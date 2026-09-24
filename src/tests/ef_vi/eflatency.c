@@ -33,8 +33,16 @@ static inline uint64_t frc64_get(void) {
   asm volatile ( "rdtscp" : "=a" (low), "=d" (high), "=c" (aux) : : );
   return (high << 32) | low;
 }
+#elif defined(__aarch64__)
+static inline uint64_t frc64_get(void) {
+  uint64_t val;
+  /* Generic timer virtual count. The isb stops the read from being hoisted,
+   * similar to the ordering given by rdtscp above. */
+  asm volatile ( "isb; mrs %0, cntvct_el0" : "=r" (val) : : "memory" );
+  return val;
+}
 #else
-#error "X86_64 required"
+#error "x86_64 or aarch64 required"
 #endif
 
 static int measure_cpu_khz(unsigned* cpu_khz)

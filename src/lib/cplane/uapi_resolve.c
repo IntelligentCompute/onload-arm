@@ -5,7 +5,9 @@
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <endian.h>
+#ifdef __BMI2__
 #include <immintrin.h>
+#endif
 
 #define VLAN_HLEN 4
 
@@ -86,7 +88,19 @@ static int bond_hash_route(struct ef_cp_handle *cp, const void *ip_hdr,
    * an input of 0bABC and a mask of 0b0010'1100 it'll produce 0b00A0'BC00. The
    * way to use this then becomes clear: set the nth bit of the input, expand
    * that using the mask, then count the trailing zeros. 5 cycles latency. */
+#ifdef __BMI2__
   hwport = ffs(_pdep_u32(1 << index, hwports));
+#else
+  /* Without pdep, clear the lowest 'index' set bits of the mask, which
+   * leaves the nth set bit as the lowest one. */
+  {
+    uint32_t mask = hwports;
+    unsigned i;
+    for( i = 0; i < index; ++i )
+      mask &= mask - 1;
+    hwport = ffs(mask);
+  }
+#endif
   return cp->hwport_ifindex[hwport];
 }
 

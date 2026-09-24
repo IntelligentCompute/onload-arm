@@ -128,7 +128,7 @@ Recommends:       openonload-devel = %{version}-%{release}
 Source0:          %{name}-%{pkgversion}.tgz
 BuildRoot:        %{_builddir}/%{name}-root
 AutoReqProv:      no
-ExclusiveArch:    x86_64 ppc64
+ExclusiveArch:    x86_64 ppc64 aarch64
 Requires(pre):    shadow-utils
 
 %global base_build_requires gawk gcc sed make bash

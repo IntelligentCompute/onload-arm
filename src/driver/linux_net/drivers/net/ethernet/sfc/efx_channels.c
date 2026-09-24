@@ -461,21 +461,17 @@ xdp_disabled:
 }
 
 static int efx_allocate_msix_channels(struct efx_nic *efx,
-				      unsigned int max_channels)
+				      unsigned int max_channels,
+				      unsigned int vec_count)
 {
 	unsigned int n_channels = efx_wanted_parallelism(efx);
 	unsigned int extra_channel_type;
 	unsigned int min_channels = 1;
-	int vec_count;
 
 	if (separate_tx_channels) {
 		n_channels *= 2;
 		min_channels = 2;
 	}
-
-	vec_count = pci_msix_vec_count(efx->pci_dev);
-	if (vec_count < 0)
-		return vec_count;
 
 	if (vec_count < max_channels)
 		max_channels = vec_count;
@@ -502,14 +498,14 @@ static int efx_allocate_msix_channels(struct efx_nic *efx,
 
 	if (vec_count < n_channels) {
 		pci_err(efx->pci_dev,
-			"WARNING: Insufficient MSI-X vectors available (%d < %u).\n",
+			"WARNING: Insufficient MSI-X vectors available (%u < %u).\n",
 			vec_count, n_channels);
 		pci_err(efx->pci_dev,
 			"WARNING: Performance may be reduced.\n");
 
 		/* reduce XDP channels */
 		n_channels -= efx->n_xdp_channels;
-		efx->n_xdp_channels = max(vec_count - (int)n_channels, 0);
+		efx->n_xdp_channels = max(vec_count, n_channels) - n_channels;
 
 		n_channels = vec_count;
 	}
@@ -899,7 +895,7 @@ void efx_set_interrupt_affinity(struct efx_nic *efx)
 	if (efx->interrupt_mode != EFX_INT_MODE_MSIX)
 		return;
 
-	sets = kcalloc(SETS_MAX, sizeof(*sets), GFP_KERNEL);
+	sets = kzalloc_objs(*sets, SETS_MAX);
 	if (!sets) {
 		netif_err(efx, drv, efx->net_dev,
 			  "Not enough temporary memory to set IRQ affinity\n");
@@ -1150,9 +1146,8 @@ static int efx_set_channel_tx(struct efx_nic *efx, struct efx_channel *channel)
 	int j;
 
 	EFX_WARN_ON_PARANOID(channel->tx_queues);
-	channel->tx_queues = kcalloc(efx->tx_queues_per_channel,
-				     sizeof(*tx_queue),
-				     GFP_KERNEL);
+	channel->tx_queues = kzalloc_objs(*tx_queue,
+					  efx->tx_queues_per_channel);
 	if (!channel->tx_queues)
 		return -ENOMEM;
 
@@ -1217,9 +1212,7 @@ static int efx_set_channel_xdp(struct efx_nic *efx, struct efx_channel *channel)
 	EFX_WARN_ON_PARANOID(channel->tx_queue_count == 0);
 
 	EFX_WARN_ON_PARANOID(channel->tx_queues);
-	channel->tx_queues = kcalloc(channel->tx_queue_count,
-				     sizeof(*tx_queue),
-				     GFP_KERNEL);
+	channel->tx_queues = kzalloc_objs(*tx_queue, channel->tx_queue_count);
 	if (!channel->tx_queues) {
 		channel->tx_queue_count = 0;
 		return -ENOMEM;
@@ -1245,7 +1238,7 @@ static struct efx_channel *efx_alloc_channel(struct efx_nic *efx, int i)
 {
 	struct efx_channel *channel;
 
-	channel = kzalloc(sizeof(*channel), GFP_KERNEL);
+	channel = kzalloc_obj(*channel);
 	if (!channel)
 		return NULL;
 
@@ -1312,7 +1305,7 @@ int efx_init_interrupts(struct efx_nic *efx)
 	if (efx->interrupt_mode != EFX_INT_MODE_MSIX)
 		return max_irqs;
 
-	rc = efx_allocate_msix_channels(efx, efx->max_channels);
+	rc = efx_allocate_msix_channels(efx, efx->max_channels, max_irqs);
 	if (rc < 0)
 		return rc;
 
@@ -1534,9 +1527,8 @@ int efx_set_channels(struct efx_nic *efx)
 		EFX_WARN_ON_PARANOID(efx->xdp_tx_queues);
 
 		/* Allocate array for XDP TX queue lookup. */
-		efx->xdp_tx_queues = kcalloc(efx->xdp_tx_queue_count,
-					     sizeof(*efx->xdp_tx_queues),
-					     GFP_KERNEL);
+		efx->xdp_tx_queues = kzalloc_objs(*efx->xdp_tx_queues,
+						  efx->xdp_tx_queue_count);
 		if (!efx->xdp_tx_queues)
 			return -ENOMEM;
 	}
@@ -2273,7 +2265,7 @@ static const struct efx_channel_type efx_default_channel_type = {
 int efx_channels_init_module(void)
 {
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SMP)
-	rss_cpu_usage = kcalloc(NR_CPUS, sizeof(rss_cpu_usage[0]), GFP_KERNEL);
+	rss_cpu_usage = kzalloc_objs(rss_cpu_usage[0], NR_CPUS);
 	if (!rss_cpu_usage)
 		return -ENOMEM;
 #endif

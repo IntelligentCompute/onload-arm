@@ -169,6 +169,14 @@ static int map_user_to_kernel(uint64_t* kernel_mappings,
   for( i = 0; i < EF_SHRUB_FD_COUNT; ++i )
     kernel_mappings[i] = (uint64_t)fget(user_mappings[i]);
 
+  /* Take a kernel reference on the shrub client socket to prevent the
+   * connection from being torn down when the owning process exits.  This
+   * keeps the shrub controller serving buffers to this stack until the
+   * kernel-side stack teardown releases the VI. */
+  if( user_mappings[EF_SHRUB_MAP_SOCKET] != (uint64_t)-1 )
+    kernel_mappings[EF_SHRUB_MAP_SOCKET] =
+      (uint64_t)fget(user_mappings[EF_SHRUB_MAP_SOCKET]);
+
   return 0;
 
 fail_buffers:
@@ -196,6 +204,7 @@ int map_kernel_to_user(uint64_t* kernel_mappings,
                        uint64_t user_buffers)
 {
   int rc;
+  int i;
   size_t buffer_bytes, server_bytes, client_bytes;
   const struct ef_shrub_client_state* state =
     (void*)kernel_mappings[EF_SHRUB_MAP_STATE];
@@ -227,6 +236,12 @@ int map_kernel_to_user(uint64_t* kernel_mappings,
   if( rc < 0 )
     goto fail_client;
 
+  /* This shared stack client doesn't have any actual fds open, because we've
+   * set up its mappings for it, but we do want to mark the mapping as
+   * present, so set the fds to a recognisable dummy value. */
+  for( i = 0; i < EF_SHRUB_FD_COUNT; ++i )
+    user_mappings[i] = EF_SHRUB_DUMMY_SOCKET;
+
   user_mappings[EF_SHRUB_MAP_STATE] =
     user_mappings[EF_SHRUB_MAP_CLIENT_FIFO] + client_bytes;
 
@@ -249,8 +264,14 @@ int efct_ubufs_map_kernel(uint64_t* kernel_mappings,
       return -EFAULT;
 
   /* Shrub connection established in userland, map to kernel */
-  if( user_mappings[EF_SHRUB_MAP_STATE] != 0 )
+  if( user_mappings[EF_SHRUB_MAP_STATE] != 0 ) {
+    /* Already mapped, nothing to do.  This happens when alloc_efct_shared_rxq
+     * refreshes explicitly and then efct_superbuf_config_refresh_all re-refreshes
+     * the same queue. Re-entering map_user_to_kernel would leak fget references. */
+    if( kernel_mappings[EF_SHRUB_MAP_STATE] != 0 )
+      return 0;
     return map_user_to_kernel(kernel_mappings, user_mappings, kernel_buffers);
+  }
 
   /* Shrub connection established in another process, map to userland */
   if( kernel_mappings[EF_SHRUB_MAP_STATE] != 0 ) {
@@ -286,5 +307,12 @@ void efct_ubufs_unmap_kernel(uint64_t* mappings)
   vfree((void*)mappings[EF_SHRUB_MAP_SERVER_FIFO]);
   for( i = 0; i < EF_SHRUB_FD_COUNT; ++i )
     fput((struct file*)mappings[i]);
+
+  /* Release the kernel reference on the shrub client socket, allowing the
+   * shrub controller to detect the disconnect and clean up. */
+  if( mappings[EF_SHRUB_MAP_SOCKET] ) {
+    fput((struct file*)mappings[EF_SHRUB_MAP_SOCKET]);
+    mappings[EF_SHRUB_MAP_SOCKET] = 0;
+  }
 }
 

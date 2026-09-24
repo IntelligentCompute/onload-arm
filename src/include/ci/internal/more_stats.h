@@ -23,6 +23,7 @@ typedef struct {
 static inline void get_more_stats(ci_netif* ni, more_stats_t* s)
 {
   unsigned i;
+  int intf_i;
   memset(s, 0, sizeof(*s));
   for( i = 0; i < ni->state->n_ep_bufs; ++i ) {
     citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, i);
@@ -86,10 +87,16 @@ static inline void get_more_stats(ci_netif* ni, more_stats_t* s)
     }
   }
 
-  s->ef_vi_rx_ev_lost = ni->state->vi_stats.rx_ev_lost;
-  s->ef_vi_rx_ev_bad_desc_i = ni->state->vi_stats.rx_ev_bad_desc_i;
-  s->ef_vi_rx_ev_bad_q_label = ni->state->vi_stats.rx_ev_bad_q_label;
-  s->ef_vi_evq_gap = ni->state->vi_stats.evq_gap;
+  s->ef_vi_rx_ev_lost = 0;
+  s->ef_vi_rx_ev_bad_desc_i = 0;
+  s->ef_vi_rx_ev_bad_q_label = 0;
+  s->ef_vi_evq_gap = 0;
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
+    s->ef_vi_rx_ev_lost += ni->state->nic[intf_i].vi_stats.rx_ev_lost;
+    s->ef_vi_rx_ev_bad_desc_i += ni->state->nic[intf_i].vi_stats.rx_ev_bad_desc_i;
+    s->ef_vi_rx_ev_bad_q_label += ni->state->nic[intf_i].vi_stats.rx_ev_bad_q_label;
+    s->ef_vi_evq_gap += ni->state->nic[intf_i].vi_stats.evq_gap;
+  }
 }
 
 

@@ -3,9 +3,12 @@
  * Copyright 2023 Advanced Micro Devices Inc.
  */
 
+#include "net_driver.h"
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_DEVLINK)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_DEVLINK_HEALTH_REPORTER)
+#include <net/devlink.h>
 #include "nvlog.h"
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_DEVLINK_HEALTH_REPORTER)
 #include "mcdi.h"
 #include <net/genetlink.h>
 
@@ -25,8 +28,8 @@ static int efx_nvlog_read(struct efx_nic *efx,
 	char *ptr;
 	int rc;
 
-	kfree(nvlog_data->nvlog);
-	nvlog_data->nvlog = kmalloc(size, GFP_KERNEL);
+	kvfree(nvlog_data->nvlog);
+	nvlog_data->nvlog = kvzalloc(size, GFP_KERNEL);
 	nvlog_data->nvlog_len = 0;
 	if (!nvlog_data->nvlog)
 		return -ENOMEM;
@@ -193,7 +196,7 @@ static int efx_nvlog_expand_timestamps(struct efx_nic *efx,
 	int rc = 0;
 
 	nvlog_data->nvlog_max_len += nvlog_data->nvlog_len;
-	nvlog_data->nvlog = kmalloc(nvlog_data->nvlog_max_len, GFP_KERNEL);
+	nvlog_data->nvlog = kvzalloc(nvlog_data->nvlog_max_len, GFP_KERNEL);
 	nvlog_data->nvlog_len = 0;
 	if (!nvlog_data->nvlog) {
 		rc = -ENOMEM;
@@ -237,7 +240,7 @@ static int efx_nvlog_expand_timestamps(struct efx_nic *efx,
 	rc = efx_nvlog_copy(nvlog_data, buffer, len);
 
 out:
-	kfree(old_buffer);
+	kvfree(old_buffer);
 	return rc;
 }
 
@@ -339,3 +342,5 @@ out:
 	return rc;
 }
 #endif /* EFX_HAVE_DEVLINK_HEALTH_REPORTER */
+#endif /* EFX_USE_DEVLINK */
+

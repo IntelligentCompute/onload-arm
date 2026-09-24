@@ -388,7 +388,7 @@ static void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    * It'd also be possible to enhance the checksum computation to be smarter
    * (e.g. by ignoring comments, etc.).
    */
-  if( strcmp(EFCH_INTF_VER, "202a90db04fd2c772a46403f02597059") ) {
+  if( strcmp(EFCH_INTF_VER, "1ae616206d92cb6ea3dc447f447ddebf") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed to %s\n",
             EFCH_INTF_VER);
     abort();
@@ -481,6 +481,8 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   int state_bytes;
   int shrub_controller_id;
   int shrub_buffer_count;
+  int extra_reservation = 0;
+  int evq_max_user_events;
 
   vi_flags |= get_vi_flags_from_env();
 
@@ -534,8 +536,15 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 
   if( evq_capacity < 0 )
     evq_capacity = -1 - ef_vi_evq_clear_stride();
-  else if( evq_capacity > 0 )
-    evq_capacity += ef_vi_evq_clear_stride();
+  else if( evq_capacity > 0 ) {
+    /* The kernel will account for any reservation due to the above negative
+     * request, but it can't know if we add the reservation to a positive evq
+     * size so we need to keep track of this ourselves. */
+    extra_reservation = ef_vi_evq_clear_stride();
+    if( extra_reservation < 0 )
+      return -EINVAL;
+    evq_capacity += extra_reservation;
+  }
 
   if( evq_capacity < 0 && (s = getenv("EF_VI_EVQ_SIZE")) )
     evq_capacity = atoi(s);
@@ -634,6 +643,12 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   if( rc != 0 )
     goto fail5;
 
+  evq_max_user_events = ra.u.vi_out.evq_max_user_events - extra_reservation;
+  if( evq_capacity != 0 && evq_max_user_events <= 0 ) {
+    rc = -ENOSPC;
+    goto fail5;
+  }
+
   ids = (void*) (state + 1);
 
   rc = ef_vi_init(vi, nic_type.arch, nic_type.variant, nic_type.revision,
@@ -645,7 +660,8 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   vi->dh = vi_dh;
   vi->vi_resource_id = ra.out_id.index;
   vi->vi_i = ra.u.vi_out.instance;
-  ef_vi_init_qs(vi, (void*)mem_mmap_ptr, ids, evq_capacity, rxq_capacity,
+  ef_vi_init_qs(vi, (void*)mem_mmap_ptr, ids, evq_capacity,
+                evq_max_user_events, rxq_capacity,
                 ra.u.vi_out.rx_prefix_len, txq_capacity);
 
   /* We must initialise any compat after queues as some allocations depend on

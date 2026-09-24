@@ -82,6 +82,7 @@ struct efch_vi_alloc_out {
   uint32_t            out_flags; /* EFAB_VI_* flags */
   uint32_t            ps_buf_size;
   uint32_t            abs_idx;
+  int32_t             evq_max_user_events;
 };
 
 

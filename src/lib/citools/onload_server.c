@@ -13,17 +13,15 @@
 
 #include <ci/tools/log.h>
 #include <ci/tools/debug.h>
+#include <ci/tools/onload_server.h>
 
 #define DEV_KMSG "/dev/kmsg"
 
 
-CI_NORETURN ci_server_init_failed(const char* srv_name,
-                                  const char* msg, ...)
+CI_NORETURN ci_server_init_failed_v(const char* srv_name,
+                                    const char* msg, va_list args)
 {
-  va_list args;
-  va_start(args, msg);
   ci_vlog(msg, args);
-  va_end(args);
   ci_log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
   ci_log("!!! %s has FAILED TO START !!!", srv_name);
   ci_log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
@@ -31,9 +29,23 @@ CI_NORETURN ci_server_init_failed(const char* srv_name,
 }
 
 
+CI_NORETURN ci_server_init_failed(const char* srv_name,
+                                  const char* msg, ...)
+{
+  va_list args;
+  va_start(args, msg);
+  ci_server_init_failed_v(srv_name, msg, args);
+}
+
+
 void ci_server_set_log_prefix(char** log_prefix, const char* srv_bin)
 {
-  asprintf(log_prefix, "%s[%d]: ", srv_bin, getpid());
+  int rc = asprintf(log_prefix, "%s[%d]: ", srv_bin, getpid());
+  if( rc < 0 ) {
+    ci_log("Failed to set log prefix %s[%d]", srv_bin, getpid());
+    return;
+  }
+
   ci_set_log_prefix(*log_prefix);
 }
 
@@ -41,23 +53,22 @@ void ci_server_set_log_prefix(char** log_prefix, const char* srv_bin)
 /* Fork off a daemon process according to the recipe in "man 7 daemon".  This
  * function returns only in the context of the daemon, and only on success;
  * otherwise, it exits. */
-void ci_server_daemonise(bool log_to_kern, char** log_prefix,
-                         const char* srv_name, const char* srv_bin)
+void ci_server_daemonise(char** log_prefix,
+                         const char* srv_name, const char* srv_bin,
+                         unsigned flags)
 {
   pid_t child;
   int rc;
   int devnull;
   int i;
   sigset_t sigset;
-  struct rlimit rlim;
 
   /* Start with some tidy-up.  We don't check errors here as failure is non-
    * fatal. */
 
   /* Close all files above stderr. */
-  if( getrlimit(RLIMIT_NOFILE, &rlim) == 0 )
-    for( i = STDERR_FILENO + 1; i < rlim.rlim_max; ++i )
-      close(i);
+  if( (flags & CI_DAEMON_CLOSE_FDS) )
+    close_range(STDERR_FILENO + 1, ~0U, 0);
 
   /* Reset all signal handlers. */
   for( i = 0; i < _NSIG; ++i )
@@ -93,10 +104,12 @@ void ci_server_daemonise(bool log_to_kern, char** log_prefix,
   ci_log("Spawned daemon process %d", getpid());
 
   umask(0);
-  rc = chdir("/");
-  if( rc == -1 )
-    ci_server_init_failed(srv_name, "Failed to change to root directory: %s",
-                          strerror(errno));
+  if( flags & CI_DAEMON_CHDIR_ROOT ) {
+    rc = chdir("/");
+    if( rc == -1 )
+      ci_server_init_failed(srv_name, "Failed to change to root directory: %s",
+                            strerror(errno));
+  }
 
   devnull = open("/dev/null", O_RDONLY);
   if( devnull == -1 )
@@ -108,13 +121,13 @@ void ci_server_daemonise(bool log_to_kern, char** log_prefix,
                           strerror(errno));
   close(devnull);
 
-  devnull = open(log_to_kern ? DEV_KMSG : "/dev/null", O_WRONLY);
+  devnull = open(flags & CI_DAEMON_LOG_TO_KERN ? DEV_KMSG : "/dev/null", O_WRONLY);
   if( devnull == -1 )
     ci_server_init_failed(srv_name, "Failed to open /dev/null for writing: %s",
                           strerror(errno));
 
   /* Start logging to syslog before we nullify std{out,err}. */
-  if( ! log_to_kern ) {
+  if( ! (flags & CI_DAEMON_LOG_TO_KERN) ) {
     ci_set_log_prefix("");
     ci_log_fn = ci_log_syslog;
     openlog(NULL, LOG_PID, LOG_DAEMON);

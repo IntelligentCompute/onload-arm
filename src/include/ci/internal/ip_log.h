@@ -363,7 +363,7 @@ extern unsigned ci_tp_log CI_HV;
   ((flags) & CI_PKT_FLAG_TX_PSH_ON_ACK   ? "PshOnAck ":"")
 
 
-#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_NETIF_LOCK_PRI_ARG(v)                                        \
   ((v) & CI_EPLOCK_LOCKED                ? "LOCKED ":"UNLOCKED"),       \
   ((v) & CI_EPLOCK_FL_NEED_WAKE          ? "CONTENDED ":""),            \
@@ -380,8 +380,7 @@ extern unsigned ci_tp_log CI_HV;
   ((v) & CI_EPLOCK_NETIF_PURGE_TXQS      ? "PURGE_TXQ ":""),            \
   ((v) & CI_EPLOCK_NETIF_KERNEL_PACKETS  ? "KPKTS ":""),                \
   ((v) & CI_EPLOCK_NETIF_FREE_READY_LIST ? "FREE_RLIST ":""),           \
-  ((v) & CI_EPLOCK_NETIF_SOCKET_LIST     ? "DEFERRED ":""),             \
-  ((v) & CI_EPLOCK_NETIF_RX_ACCOUNTING   ? "RX_ACCOUNTING ":"")
+  ((v) & CI_EPLOCK_NETIF_SOCKET_LIST     ? "DEFERRED ":"")
 
 
 #define CI_NETIF_ERRORS_FMT       "%s%s%s%s"
@@ -392,9 +391,10 @@ extern unsigned ci_tp_log CI_HV;
   ((errors) & CI_NETIF_ERROR_SYNRECV_TABLE  ? "SYNRECV ":"")
 
 
-#define CI_NETIF_NIC_ERRORS_FMT       "%s"
+#define CI_NETIF_NIC_ERRORS_FMT       "%s%s"
 #define CI_NETIF_NIC_ERRORS_PRI_ARG(errors)                         \
-  ((errors) & CI_NETIF_NIC_ERROR_REMAP      ? "REMAP ":"")
+  ((errors) & CI_NETIF_NIC_ERROR_REMAP         ? "REMAP ":""),      \
+  ((errors) & CI_NETIF_NIC_ERROR_AWAITING_EFCT ? "EFCT ":"")
 
 
 #define OO_CMSG_FLAGS_FMT  "%s%s%s%s%s%s%s%s"

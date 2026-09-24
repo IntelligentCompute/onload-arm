@@ -39,6 +39,7 @@
 #include <linux/ctype.h>
 #include <linux/aer.h>
 #include <linux/iommu.h>
+#include <linux/overflow.h>
 #include <asm/byteorder.h>
 #include <net/ip.h>
 
@@ -425,6 +426,60 @@ static inline bool __netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 	#define __read_mostly
 #endif
 
+#ifndef struct_size_t
+#define struct_size_t(type, member, count)	\
+	struct_size((type *)NULL, member, count)
+#endif
+
+#ifdef EFX_NEED_KMALLOC_OBJ
+#ifndef default_gfp
+#define __default_gfp(a,b,...) b
+#define default_gfp(...) __default_gfp(,##__VA_ARGS__,GFP_KERNEL)
+#endif
+
+#define __alloc_objs(KMALLOC, GFP, TYPE, COUNT)				\
+({									\
+	const size_t __obj_size = size_mul(sizeof(TYPE), COUNT);	\
+	(TYPE *)KMALLOC(__obj_size, GFP);				\
+})
+
+#define __alloc_flex(KMALLOC, GFP, TYPE, FAM, COUNT)			\
+({									\
+	const size_t __count = (COUNT);					\
+	const size_t __obj_size = struct_size_t(TYPE, FAM, __count);	\
+	TYPE *__obj_ptr = KMALLOC(__obj_size, GFP);			\
+	__obj_ptr;							\
+})
+
+#define kmalloc_obj(VAR_OR_TYPE, ...) \
+	__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof(VAR_OR_TYPE), 1)
+#define kmalloc_objs(VAR_OR_TYPE, COUNT, ...) \
+	__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof(VAR_OR_TYPE), COUNT)
+#define kmalloc_flex(VAR_OR_TYPE, FAM, COUNT, ...) \
+	__alloc_flex(kmalloc, default_gfp(__VA_ARGS__), typeof(VAR_OR_TYPE), FAM, COUNT)
+
+#define kzalloc_obj(P, ...) \
+	__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof(P), 1)
+#define kzalloc_objs(P, COUNT, ...) \
+	__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof(P), COUNT)
+#define kzalloc_flex(P, FAM, COUNT, ...)		\
+	__alloc_flex(kzalloc, default_gfp(__VA_ARGS__), typeof(P), FAM, COUNT)
+
+#define kvmalloc_obj(P, ...) \
+	__alloc_objs(kvmalloc, default_gfp(__VA_ARGS__), typeof(P), 1)
+#define kvmalloc_objs(P, COUNT, ...) \
+	__alloc_objs(kvmalloc, default_gfp(__VA_ARGS__), typeof(P), COUNT)
+#define kvmalloc_flex(P, FAM, COUNT, ...) \
+	__alloc_flex(kvmalloc, default_gfp(__VA_ARGS__), typeof(P), FAM, COUNT)
+
+#define kvzalloc_obj(P, ...) \
+	__alloc_objs(kvzalloc, default_gfp(__VA_ARGS__), typeof(P), 1)
+#define kvzalloc_objs(P, COUNT, ...) \
+	__alloc_objs(kvzalloc, default_gfp(__VA_ARGS__), typeof(P), COUNT)
+#define kvzalloc_flex(P, FAM, COUNT, ...) \
+	__alloc_flex(kvzalloc, default_gfp(__VA_ARGS__), typeof(P), FAM, COUNT)
+#endif /* EFX_NEED_KMALLOC_OBJ */
+
 #ifdef EFX_NEED_BITMAP_ZALLOC
 #define bitmap_zalloc(count, gfp)	kzalloc(BITS_TO_LONGS(count), gfp)
 #define bitmap_free(ptr)		kfree(ptr)
@@ -558,36 +613,67 @@ static inline void rhashtable_walk_enter(struct rhashtable *ht,
 #endif
 
 #ifdef EFX_NEED_ARRAY_SIZE
-/**
- * array_size() - Calculate size of 2-dimensional array.
- *
- * @a: dimension one
- * @b: dimension two
- *
- * Calculates size of 2-dimensional array: @a * @b.
- *
- * Returns: number of bytes needed to represent the array.
- */
-static inline __must_check size_t array_size(size_t a, size_t b)
-{
-	return(a * b);
-}
-#else
-/* On RHEL7.6 nothing includes this yet */
-#include <linux/overflow.h>
+#define array_size size_mul
 #endif
 
-#ifdef EFX_NEED_KREALLOC_ARRAY
+#ifdef EFX_NEED_SIZE_MUL
 #ifndef SIZE_MAX
 #define SIZE_MAX (~(size_t)0)
 #endif
 
+#ifndef check_mul_overflow
+#define check_mul_overflow(a, b, d) ({		\
+	typeof(a) __a = (a);			\
+	typeof(b) __b = (b);			\
+	typeof(d) __d = (d);			\
+	(void) (&__a == &__b);			\
+	(void) (&__a == __d);			\
+	__builtin_mul_overflow(__a, __b, __d);	\
+})
+#endif
+
+#ifndef check_add_overflow
+#define check_add_overflow(a, b, d) ({		\
+	typeof(a) __a = (a);			\
+	typeof(b) __b = (b);			\
+	typeof(d) __d = (d);			\
+	(void) (&__a == &__b);			\
+	(void) (&__a == __d);			\
+	__builtin_add_overflow(__a, __b, __d);	\
+})
+#endif
+
+static inline size_t __must_check size_mul(size_t factor1, size_t factor2)
+{
+	size_t bytes;
+
+	if (check_mul_overflow(factor1, factor2, &bytes))
+		return SIZE_MAX;
+
+	return bytes;
+}
+
+static inline size_t __must_check size_add(size_t addend1, size_t addend2)
+{
+	size_t bytes;
+
+	if (check_add_overflow(addend1, addend2, &bytes))
+		return SIZE_MAX;
+
+	return bytes;
+}
+#endif /* EFX_NEED_SIZE_MUL */
+
+#ifdef EFX_NEED_KREALLOC_ARRAY
 static __must_check inline void *
 krealloc_array(void *p, size_t new_n, size_t new_size, gfp_t flags)
 {
-	size_t bytes = array_size(new_n, new_size);
+	size_t bytes;
 
-	return (bytes == SIZE_MAX ? NULL : krealloc(p, bytes, flags));
+	if (unlikely(check_mul_overflow(new_n, new_size, &bytes)))
+		return NULL;
+
+	return krealloc(p, bytes, flags);
 }
 #endif
 
@@ -778,30 +864,25 @@ unsigned int cpumask_local_spread(unsigned int i, int node);
 
 #include <linux/pps_kernel.h>
 
-#ifdef EFX_NEED_KTIME_GET_SNAPSHOT
-/* simplified structure for systems which don't have a kernel definition
- * we only need a couple of fields and layout doesn't matter for this usage */
-struct system_time_snapshot {
-	ktime_t			real;
-	ktime_t			raw;
-};
+#include <linux/timekeeping.h>
 
-static inline void ktime_get_snapshot(struct system_time_snapshot *systime_snapshot)
-{
-	struct timespec64 ts_real;
-	struct timespec64 ts_raw = {};
-
-#ifdef CONFIG_NTP_PPS
-	getnstime_raw_and_real(&ts_raw, &ts_real);
-#else
-	getnstimeofday(&ts_real);
+#ifdef EFX_NEED_SYSTEM_TIME_SNAPSHOT_SYSTIME
+#define systime real
+#endif
+#ifdef EFX_NEED_SYSTEM_TIME_SNAPSHOT_MONORAW
+#define monoraw raw
+#endif
+#ifdef EFX_NEED_SYSTEM_DEVICE_CROSSTSTAMP_SYS_SYSTIME
+#define sys_systime sys_realtime
 #endif
 
-	systime_snapshot->real = timespec64_to_ktime(ts_real);
-	systime_snapshot->raw = timespec64_to_ktime(ts_raw);
+#ifdef EFX_NEED_KTIME_GET_SNAPSHOT_ID
+static inline void ktime_get_snapshot_id(clockid_t clock_id,
+					 struct system_time_snapshot *systime_snapshot)
+{
+	if (clock_id == CLOCK_REALTIME)
+		ktime_get_snapshot(systime_snapshot);
 }
-#else
-#include <linux/timekeeping.h>
 #endif
 
 #include <linux/ptp_clock_kernel.h>
@@ -966,6 +1047,12 @@ static inline bool efx_napi_complete_done(struct napi_struct *napi,
 	return true;
 }
 #define napi_complete_done efx_napi_complete_done
+#endif
+
+#ifdef EFX_NEED_NETIF_CARRIER_EVENT
+static inline void netif_carrier_event(struct net_device *dev __always_unused)
+{
+}
 #endif
 
 #if defined(EFX_NEED_HWMON_DEVICE_REGISTER_WITH_INFO)
@@ -1588,6 +1675,20 @@ void devlink_flash_update_timeout_notify(struct devlink *devlink,
 					 const char *component,
 					 unsigned long timeout);
 #endif
+
+#if defined(EFX_HAVE_DEVLINK_HEALTH_REPORTER_OLD)
+static inline struct devlink_health_reporter *
+efx_devlink_health_reporter_create(struct devlink *devlink,
+				   const struct devlink_health_reporter_ops *ops,
+				   void *priv)
+{
+	return devlink_health_reporter_create(devlink, ops, 0, priv);
+}
+#undef devlink_health_reporter_create
+#define devlink_health_reporter_create efx_devlink_health_reporter_create
+#define EFX_HAVE_DEVLINK_HEALTH_REPORTER
+#endif /* EFX_HAVE_DEVLINK_HEALTH_REPORTER_OLD */
+
 #else
 
 /* devlink is not available, provide a 'fake' devlink info request structure
@@ -1788,6 +1889,47 @@ static inline struct dentry *try_lookup_noperm(struct qstr *name, struct dentry 
 {
 	return d_hash_and_lookup(base, name);
 }
+#endif
+
+#if defined(EFX_HAVE_CXL_H) && defined(EFX_HAVE_CXL_SET_CAPACITY) && defined(CONFIG_SFC_CXL)
+/* Support for CXL Type2 device is available */
+#define EFX_USE_CXL
+#endif
+
+#ifndef EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT
+struct ethtool_rxfh_context {
+	u32 indir_size;
+	u32 key_size;
+	u16 priv_size;
+	u8 hfunc;
+	u8 input_xfrm;
+	u8 indir_configured:1;
+	u8 key_configured:1;
+	/* private: driver private data, indirection table, and hash key are
+	 * stored sequentially in @data area.  Use below helpers to access.
+	 */
+	u32 key_off;
+	u8 data[] __aligned(sizeof(void *));
+};
+
+static inline void *ethtool_rxfh_context_priv(struct ethtool_rxfh_context *ctx)
+{
+	return ctx->data;
+}
+
+static inline u32 *ethtool_rxfh_context_indir(struct ethtool_rxfh_context *ctx)
+{
+	return (u32 *)(ctx->data + ALIGN(ctx->priv_size, sizeof(u32)));
+}
+
+static inline u8 *ethtool_rxfh_context_key(struct ethtool_rxfh_context *ctx)
+{
+	return &ctx->data[ctx->key_off];
+}
+#endif
+
+#ifndef EFX_HAVE_MUTEX_GET_OWNER
+extern unsigned long mutex_get_owner(struct mutex *lock);
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

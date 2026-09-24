@@ -29,9 +29,22 @@ enum ef_shrub_client_mappings
   EF_SHRUB_MAP_SERVER_FIFO,
   EF_SHRUB_MAP_CLIENT_FIFO,
   EF_SHRUB_MAP_STATE,
+  EF_SHRUB_MAP_SOCKET,
 
   EF_SHRUB_MAP_COUNT
 };
+
+/* In kernel we hold a file reference, so NULL is an invalid value. However,
+ * 0 is a legitimate fd, so for userspace we use a value of -1.
+ * Shared stack users have their mappings set up by the kernel, rather than
+ * opening any of their own sockets. We define a dummy value here to indicate
+ * that the mapping is present, but the fd is not. */
+#ifdef __KERNEL__
+#define EF_SHRUB_NO_SOCKET 0
+#else
+#define EF_SHRUB_NO_SOCKET (uint64_t)-1
+#endif
+#define EF_SHRUB_DUMMY_SOCKET (uint64_t)-2
 
 /* Structure for managing a client instance */
 struct ef_shrub_client
@@ -84,6 +97,10 @@ int ef_shrub_client_open(struct ef_shrub_client* client,
  * This will implicitly release all buffers acquired from the connection.
  */
 void ef_shrub_client_close(struct ef_shrub_client* client);
+
+/* Release userspace file descriptors after the kernel has taken its own
+ * references via fget(). The mmap'd memory regions remain valid. */
+void ef_shrub_client_release_fds(struct ef_shrub_client* client);
 
 /* Acquire the next buffer to be read.
  *

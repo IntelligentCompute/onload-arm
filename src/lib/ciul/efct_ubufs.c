@@ -36,6 +36,7 @@ struct efct_ubufs
   ef_driver_handle pd_dh;
   bool is_shrub_filter_info_set;
   bool shrub_use_interrupts;
+  bool is_shrub_controller;
   size_t shrub_max_client_bufs;
   struct efct_ubufs_rxq q[EF_VI_MAX_EFCT_RXQS];
   char server_address[EF_SHRUB_SERVER_SOCKET_LEN];
@@ -51,9 +52,16 @@ static const struct efct_ubufs* const_ubufs(const ef_vi* vi)
   return CI_CONTAINER(struct efct_ubufs, ops, vi->efct_rxqs.ops);
 }
 
-static bool rxq_is_local(const ef_vi* vi, int ix)
+bool efct_ubufs_rxq_is_local(const ef_vi* vi, int ix)
 {
-  return const_ubufs(vi)->q[ix].shrub_client.mappings[0] == 0;
+  return const_ubufs(vi)->q[ix].shrub_client.mappings[EF_SHRUB_FD_BUFFERS] ==
+         EF_SHRUB_NO_SOCKET;
+}
+
+void efct_ubufs_release_shrub_fds(ef_vi* vi, int ix)
+{
+  EF_VI_ASSERT(!efct_ubufs_rxq_is_local(vi, ix));
+  ef_shrub_client_release_fds(&get_ubufs(vi)->q[ix].shrub_client);
 }
 
 static void update_filled(ef_vi* vi, int ix)
@@ -134,10 +142,15 @@ static void post_buffers(ef_vi* vi, int ix)
 {
   ef_vi_efct_rxq_state* state = &vi->ep_state->rxq.efct_state[ix];
   unsigned limit = get_ubufs(vi)->nic_fifo_limit;
+  const unsigned pkts_per_superbuf = EFCT_RX_SUPERBUF_BYTES / EFCT_PKT_STRIDE;
+  const unsigned required_evq_slots = (unsigned)state->generates_events *
+                                      pkts_per_superbuf;
   bool free_list_was_empty = ( state->free_head == -1 );
   bool fifo_was_full = ( state->fifo_count_hw >= limit );
+  bool evq_no_space = ( ! ef_vi_can_consume_evq_slots(vi, required_evq_slots) );
 
-  while( state->free_head != -1 && state->fifo_count_hw < limit ) {
+  while( state->free_head != -1 && state->fifo_count_hw < limit &&
+         ef_vi_consume_evq_slots(vi, required_evq_slots) ) {
     int16_t id = state->free_head;
     const ci_qword_t* header = efct_superbuf_access(vi, ix, id);
     struct efct_rx_descriptor* desc = efct_rx_desc_for_sb(vi, ix, id);
@@ -164,6 +177,8 @@ static void post_buffers(ef_vi* vi, int ix)
     EF10CT_STATS_INC(vi, ix, buffers_posted);
   }
 
+  if ( evq_no_space )
+    EF10CT_STATS_INC(vi, ix, rollover_failed_no_evq_space);
   if ( free_list_was_empty )
     EF10CT_STATS_INC(vi, ix, free_list_empty);
   if ( fifo_was_full )
@@ -216,7 +231,7 @@ static int efct_ubufs_next_local(ef_vi* vi, int ix, bool* sentinel, unsigned* sb
 
 static int efct_ubufs_next(ef_vi* vi, int ix, bool* sentinel, unsigned* sbseq)
 {
-  if( rxq_is_local(vi, ix) )
+  if( efct_ubufs_rxq_is_local(vi, ix) )
     return efct_ubufs_next_local(vi, ix, sentinel, sbseq);
   else
     return efct_ubufs_next_shared(vi, ix, sentinel, sbseq);
@@ -251,7 +266,7 @@ static void efct_ubufs_free_shared(ef_vi* vi, int ix, int sbid)
 
 static void efct_ubufs_free(ef_vi* vi, int ix, int sbid)
 {
-  if( rxq_is_local(vi, ix) )
+  if( efct_ubufs_rxq_is_local(vi, ix) )
     efct_ubufs_free_local(vi, ix, sbid);
   else
     efct_ubufs_free_shared(vi, ix, sbid);
@@ -272,7 +287,7 @@ static bool efct_ubufs_shared_available(const ef_vi* vi, int ix)
 
 static bool efct_ubufs_available(const ef_vi* vi, int ix)
 {
-  if( rxq_is_local(vi, ix) )
+  if( efct_ubufs_rxq_is_local(vi, ix) )
     return efct_ubufs_local_available(vi, ix);
   else
     return efct_ubufs_shared_available(vi, ix);
@@ -301,6 +316,11 @@ void efct_ubufs_set_rxq_io_window(ef_vi* vi, int ix, volatile uint64_t* p)
   get_ubufs(vi)->q[ix].rx_post_buffer_reg = p;
 }
 
+void efct_ubufs_set_is_shrub_controller(ef_vi* vi)
+{
+  get_ubufs(vi)->is_shrub_controller = true;
+}
+
 void efct_ubufs_local_attach_internal(ef_vi* vi, int ix, int qid, unsigned n_superbufs)
 {
   unsigned id;
@@ -312,18 +332,19 @@ void efct_ubufs_local_attach_internal(ef_vi* vi, int ix, int qid, unsigned n_sup
   }
 
   qs->efct_state[ix].superbuf_pkts = EFCT_RX_SUPERBUF_BYTES / EFCT_PKT_STRIDE;
-  qs->efct_active_qs |= 1 << ix;
   efct_vi_start_rxq(vi, ix, qid);
   post_buffers(vi, ix);
 }
 
-int efct_ubufs_shared_attach_internal(ef_vi* vi, int ix, int qid, void* superbuf)
+int efct_ubufs_shared_attach_internal(ef_vi* vi, int ix, int qid,
+                                      void* superbuf,
+                                      uint32_t* superbuf_pkts_out,
+                                      int* hw_qid_out)
 {
   int rc;
   struct efct_ubufs* ubufs = get_ubufs(vi);
   struct ef_shrub_client* client = &ubufs->q[ix].shrub_client;
   const struct ef_shrub_shared_metrics* metrics;
-  ef_vi_rxq_state* qs = &vi->ep_state->rxq;
 
   rc = ef_shrub_client_open(client, superbuf, ubufs->server_address, qid,
                             ubufs->shrub_max_client_bufs);
@@ -333,15 +354,8 @@ int efct_ubufs_shared_attach_internal(ef_vi* vi, int ix, int qid, void* superbuf
   }
 
   metrics = &ef_shrub_client_get_state(client)->metrics;
-  qs->efct_state[ix].superbuf_pkts = metrics->buffer_bytes / EFCT_PKT_STRIDE;
-  qs->efct_active_qs |= 1 << ix;
-
-  rc = efct_vi_sync_rxq(vi, ix, metrics->qid);
-  if ( rc < 0 ) {
-    LOG(ef_log("%s: ERROR syncing shrub_client to rxq! rc=%d", __FUNCTION__,
-               rc));
-    return rc;
-  }
+  *superbuf_pkts_out = metrics->buffer_bytes / EFCT_PKT_STRIDE;
+  *hw_qid_out = metrics->qid;
   return ix;
 }
 
@@ -361,27 +375,40 @@ int efct_ubufs_get_shared_filter_info(ef_vi* vi, unsigned* token,
   return 0;
 }
 
-static int efct_ubufs_pre_attach(ef_vi* vi, bool shared_mode)
+static int efct_ubufs_pre_attach(ef_vi* vi, bool shared_mode,
+                                 bool wants_interrupts)
 {
   struct efct_ubufs *ubufs = get_ubufs(vi);
   unsigned token;
   bool use_interrupts;
   int rc;
 
-  if( ! shared_mode || ubufs->is_shrub_filter_info_set )
+  if( ! shared_mode )
     return 0;
 
-  rc = efct_ubufs_get_shared_filter_info(vi, &token, &use_interrupts);
-  if( rc < 0 )
-    return rc;
+  if( !ubufs->is_shrub_filter_info_set ) {
+    rc = efct_ubufs_get_shared_filter_info(vi, &token, &use_interrupts);
+    if( rc < 0 )
+      return rc;
 
-  rc = efct_ubufs_set_shared_rxq_token(vi, token);
-  if( rc == 0 ) {
+    rc = efct_ubufs_set_shared_rxq_token(vi, token);
+    if( rc < 0 )
+      return rc;
+
     ubufs->is_shrub_filter_info_set = true;
     ubufs->shrub_use_interrupts = use_interrupts;
   }
 
-  return rc;
+  /* This is a convenient early fail point if a client has asked for an invalid
+   * configuration, allowing us to bail out before we get as far as the actual
+   * filter install which would leave us with an allocated RXQ to clean up. */
+  if( wants_interrupts && !ubufs->shrub_use_interrupts ) {
+    ef_log("%s: Error: shrub controller must be configured to use interrupts "
+           "to allow clients to use interrupts", __FUNCTION__);
+    return -EINVAL;
+  }
+
+  return 0;
 }
 
 static int efct_ubufs_attach(ef_vi* vi,
@@ -410,8 +437,11 @@ static int efct_ubufs_attach(ef_vi* vi,
 
   /* For ef_vi shrub clients the interrupt mode is currently decided solely by the
    * controller configuration. */
-  if( shared_mode )
+  if( shared_mode ) {
+    /* We should have checked this in the pre-attach phase */
+    EF_VI_ASSERT(!use_interrupts || ubufs->shrub_use_interrupts);
     use_interrupts = ubufs->shrub_use_interrupts;
+  }
 
   rc = efct_ubufs_init_rxq_resource(vi, qid, n_superbufs, use_interrupts,
                                     &rxq->rxq_id);
@@ -427,11 +457,20 @@ static int efct_ubufs_attach(ef_vi* vi,
 
   if( shared_mode ) {
     void* superbufs = (void*)efct_superbuf_access(vi, ix, 0);
-    rc = efct_ubufs_shared_attach_internal(vi, ix, qid, superbufs);
+    uint32_t superbuf_pkts;
+    int hw_qid;
+    rc = efct_ubufs_shared_attach_internal(vi, ix, qid, superbufs,
+                                           &superbuf_pkts, &hw_qid);
     if( rc < 0 ) {
       LOGVV(ef_log("%s: efct_ubufs_shared_attach_internal %d", __FUNCTION__, rc));
       goto fail;
     }
+    /* ef_vi path: no kernel poll race, activate immediately */
+    vi->ep_state->rxq.efct_state[ix].superbuf_pkts = superbuf_pkts;
+    vi->ep_state->rxq.efct_active_qs |= 1u << ix;
+    rc = efct_vi_sync_rxq(vi, ix, hw_qid);
+    if( rc < 0 )
+      goto fail;
   }
   else {
     rc = efct_ubufs_init_rxq_buffers(vi, ix, fd, n_superbufs,
@@ -443,6 +482,8 @@ static int efct_ubufs_attach(ef_vi* vi,
     }
 
     efct_ubufs_local_attach_internal(vi, ix, qid, n_superbufs);
+    /* ef_vi path: no kernel poll race, activate immediately */
+    vi->ep_state->rxq.efct_active_qs |= 1u << ix;
   }
 
   *qid_out = qid;
@@ -466,7 +507,7 @@ static void efct_ubufs_detach(ef_vi* vi, int ix)
   eqs->fifo_tail_hw = eqs->fifo_tail_sw = -1;
   eqs->qid = -1;
 
-  if( rxq_is_local(vi, ix) )
+  if( efct_ubufs_rxq_is_local(vi, ix) )
     efct_ubufs_free_rxq_buffers(vi, ix, rxq->rx_post_buffer_reg);
   else
 #ifdef __KERNEL__
@@ -494,8 +535,33 @@ static efch_resource_id_t efct_ubufs_get_rxq_resource_id(ef_vi* vi, int ix)
 static int efct_ubufs_get_wakeup_params(ef_vi* vi, int qix, unsigned* sbseq,
                                         unsigned* pktix)
 {
-  /* TODO */
-  return -EOPNOTSUPP;
+  ef_vi_efct_rxq_ptr* rxq_ptr = &vi->ep_state->rxq.rxq_ptr[qix];
+  uint64_t sb;
+  uint64_t hw;
+
+  if( ! (vi->ep_state->rxq.efct_active_qs & (1 << qix)) )
+    return -ENOENT;
+
+  if( ! get_ubufs(vi)->is_shrub_controller ) {
+    /* Exclusive queues and shared clients use per-packet wakeup params. */
+    return efct_vi_get_pkt_wakeup_params(vi, qix, sbseq, pktix);
+  }
+
+  /* Shrub controller: we want to wake when the next superbuf becomes
+   * available for the controller to hand out. The SW FIFO is consumed
+   * eagerly (buffers are handed to clients before the NIC fills them),
+   * so state->sbseq tracks how many superbufs have been consumed, which
+   * runs ahead of the kernel's packet position.
+   *
+   * The wakeup seqno must match the kernel's packet stream position.
+   * fifo_count_hw tracks buffers still awaiting hardware fill, so
+   * (sbseq - fifo_count_hw) gives the sbseq of the earliest unfilled
+   * buffer - the point in the packet stream we're actually waiting for. */
+  sb = vi->ep_state->rxq.efct_state[qix].sbseq;
+  hw = vi->ep_state->rxq.efct_state[qix].fifo_count_hw;
+  *sbseq = sb >= hw ? (unsigned)(sb - hw) : 0;
+  *pktix = rxq_ptr->superbuf_pkts - 1;
+  return 0;
 }
 
 static int efct_ubufs_prime(ef_vi* vi, ef_driver_handle dh)
@@ -604,7 +670,7 @@ static int efct_ubufs_set_shrub_max_client_bufs(ef_vi* vi,
 int efct_ubufs_init(ef_vi* vi, ef_pd* pd, ef_driver_handle pd_dh)
 {
   struct efct_ubufs* ubufs;
-  int i, rc;
+  int i, j, rc;
 
   rc = efct_superbufs_reserve(vi, NULL);
   if( rc < 0 )
@@ -622,6 +688,9 @@ int efct_ubufs_init(ef_vi* vi, ef_pd* pd, ef_driver_handle pd_dh)
     ef_vi_efct_rxq_state* efct_state = efct_get_rxq_state(vi, i);
 
     rxq->rxq_id = rxq->memreg_id = efch_resource_id_none();
+    rxq->shrub_client.socket = EF_SHRUB_NO_SOCKET;
+    for( j = 0; j < EF_SHRUB_FD_COUNT; ++j )
+      rxq->shrub_client.mappings[j] = EF_SHRUB_NO_SOCKET;
     efct_rxq->live.superbuf_pkts = &efct_state->superbuf_pkts;
     efct_rxq->live.config_generation = &efct_state->config_generation;
 #ifndef __KERNEL__

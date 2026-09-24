@@ -3,9 +3,9 @@
 
 Please see ./README for a description of the #TYPE# software.
 
-The Debian #TYPE# source package provides two packages,
+The Debian #TYPE# source package provides multiple packages,
 
- 1) #TYPE#-user, which the provides the 32 bit and 64 bit userspace library
+ 1) #TYPE#-user, which the provides the userspace library
  2) #TYPE#-source, which provides the source for the kernel modules
  3) #TYPE#-dev, which provides header files for development with onload
  4) #TYPE#-examples, which provides onload and ef_vi sample applications
@@ -21,4 +21,4 @@ The #TYPE#-source package can be used in several ways,
    for the Debian kernel-image package that you are using. See
    the "modules_image" section of the make-kpkg(1) man page.
 
- -- AMD Solarflare NIC Support <support-nic@amd.com>  Wed, 08 Apr 2015 17:20:35 +0100
+ -- AMD NIC Support <support-nic@amd.com>  Wed, 08 Apr 2015 17:20:35 +0100

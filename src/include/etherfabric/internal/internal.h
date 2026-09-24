@@ -82,8 +82,8 @@ extern int  ef_vi_init(struct ef_vi*, int arch, int variant, int revision,
 extern void ef_vi_init_io(struct ef_vi*, void* io_area);
 
 extern char* ef_vi_init_qs(struct ef_vi*, char* q_mem, uint32_t* ids,
-                           int evq_size, int rxq_size, int rx_prefix_len,
-                           int txq_size);
+                           int evq_size, unsigned evq_max_events, int rxq_size,
+                           int rx_prefix_len, int txq_size);
 
 extern void ef_vi_init_rxq(struct ef_vi*, int ring_size, void* descriptors,
 			   void* ids, int prefix_len);
@@ -91,7 +91,8 @@ extern void ef_vi_init_rxq(struct ef_vi*, int ring_size, void* descriptors,
 extern void ef_vi_init_txq(struct ef_vi*, int ring_size, void* descriptors,
 			   void* ids);
 
-extern void ef_vi_init_evq(struct ef_vi*, int ring_size, void* event_ring);
+extern void ef_vi_init_evq(struct ef_vi*, int ring_size, void* event_ring,
+                           unsigned max_events);
 
 extern void ef_vi_init_timer(struct ef_vi* vi, int timer_quantum_ns);
 
@@ -115,10 +116,15 @@ extern int efct_kbufs_init_internal(ef_vi* vi,
 extern int efct_ubufs_init_internal(ef_vi* vi);
 extern void efct_ubufs_local_attach_internal(ef_vi* vi, int ix, int qid, unsigned bufs);
 extern int efct_ubufs_shared_attach_internal(ef_vi* vi, int ix, int qid,
-                                             void* bufs);
+                                             void* bufs,
+                                             uint32_t* superbuf_pkts_out,
+                                             int* hw_qid_out);
+extern void efct_ubufs_set_is_shrub_controller(ef_vi* vi);
 extern int efct_ubufs_set_shared(ef_vi* vi, int shrub_controller_id, int shrub_server_id);
 extern int efct_ubufs_get_shared_filter_info(ef_vi* vi, unsigned* token,
                                              bool* use_interrupts);
+bool efct_ubufs_rxq_is_local(const ef_vi* vi, int ix);
+void efct_ubufs_release_shrub_fds(ef_vi* vi, int ix);
 volatile uint64_t* efct_ubufs_get_rxq_io_window(ef_vi* vi, int ix);
 void efct_ubufs_set_rxq_io_window(ef_vi* vi, int ix, volatile uint64_t* p);
 int efct_vi_find_rxq(ef_vi* vi, int qid);
@@ -130,6 +136,32 @@ int efct_poll_tx(ef_vi* vi, ef_event* evs, int evs_len);
 int efct_vi_get_pkt_wakeup_params(ef_vi* vi, int qid, unsigned* sbseq,
                                   unsigned* pktix);
 int efct_vi_prime(ef_vi* vi, ef_driver_handle dh);
+
+/*! \brief Poll an event queue for future events
+**
+** \param evq     The event queue to poll.
+** \param evs     Array in which to return polled events.
+** \param evs_len Length of the evs array, must be >=
+**                EF_VI_EVENT_POLL_MIN_EVS.
+**
+** \return The number of events retrieved.
+**
+** This provides a generic polling method that can be used as an alternative
+** to the architecture specific future poll method, such as
+** efct_vi_rx_future_poll. On architectures without such a method it is
+** equivalent to ef_eventq_poll. On architectures with such a method the
+** same pre-conditions apply to this as for the architecture specific option.
+**
+** On different architectures the detection of incoming packets is
+** sufficiently different there is no generic future peek method. However, for
+** code that handles multiple architectures this poll method serves to
+** make the code common for the poll portion of the peek/poll sequence.
+**
+** This function returns immediately, even if there are no outstanding
+** events. The array might not be full on return.
+*/
+#define ef_future_eventq_poll(evq, evs, evs_len)               \
+  (evq)->ops.future_eventq_poll((evq), (evs), (evs_len))
 
 /* This returns the ID of the next RX buffer in the RXQ.  In the absence of
  * event merging and errors, this will be the same packet that will be returned

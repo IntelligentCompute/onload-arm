@@ -557,7 +557,7 @@ int ef100_phy_probe(struct efx_nic *efx)
 	int rc;
 
 	/* Probe for the PHY */
-	efx->phy_data = kzalloc(sizeof(struct efx_mcdi_phy_data), GFP_KERNEL);
+	efx->phy_data = kzalloc_obj(struct efx_mcdi_phy_data);
 	if (efx->phy_data == NULL)
 		return -ENOMEM;
 
@@ -1104,7 +1104,7 @@ static void efx_ef100_udp_tnl_add_port(struct efx_nic *efx,
 	entry = __efx_ef100_udp_tnl_find_port(nic_data, tnl.port);
 	if (entry) /* EEXIST */
 		goto out;
-	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc_obj(*entry);
 	if (!entry) /* ENOMEM */
 		goto out;
 	*entry = tnl;
@@ -1555,7 +1555,7 @@ static int ef100_probe_main(struct efx_nic *efx)
 	if (WARN_ON(bar_size == 0))
 		return -EIO;
 
-	nic_data = kzalloc(sizeof(*nic_data), GFP_KERNEL);
+	nic_data = kzalloc_obj(*nic_data);
 	if (!nic_data)
 		return -ENOMEM;
 	efx->nic_data = nic_data;
@@ -1897,6 +1897,8 @@ const struct efx_nic_type ef100_pf_nic_type = {
 	 */
 	.mem_bar = NULL,
 	.mem_map_size = NULL,
+	.mc_bar = NULL,
+	.mc_sft_status = NULL,
 	.max_dma_mask = DMA_BIT_MASK(ESF_GZ_TX_SEND_ADDR_WIDTH),
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_TC_OFFLOAD) && !defined(EFX_HAVE_FLOW_INDR_BLOCK_CB_REGISTER) && !defined(EFX_HAVE_FLOW_INDR_DEV_REGISTER)
@@ -2025,6 +2027,8 @@ const struct efx_nic_type ef100_vf_nic_type = {
 
 	.mem_bar = NULL,
 	.mem_map_size = NULL,
+	.mc_bar = NULL,
+	.mc_sft_status = NULL,
 	.max_dma_mask = DMA_BIT_MASK(ESF_GZ_TX_SEND_ADDR_WIDTH),
 #ifdef EFX_NOT_UPSTREAM
 #if IS_MODULE(CONFIG_SFC_DRIVERLINK)

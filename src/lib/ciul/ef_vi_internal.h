@@ -320,13 +320,46 @@ extern enum ef_pd_flags ef_pd_flags_from_env(enum ef_pd_flags flags,
                                              int ifindex);
 
 typedef uint64_t efct_tx_aperture_t;
-ci_inline uint64_t efct_tx_scale_offset_bytes(uint64_t offset_bytes)
+
+ci_inline __attribute__((always_inline))
+uint64_t efct_tx_scale_offset_bytes(uint64_t offset_bytes)
 {
   /* When transmitting with efct, we track the offset in the aperture as the
    * number of writes performed to the aperture multiplied by the size of the
    * aperture. As such, we should scale any offset in bytes by the size of
    * the aperture's type. */
   return offset_bytes / sizeof(efct_tx_aperture_t);
+}
+
+ci_inline bool ef_vi_can_consume_evq_slots(ef_vi* vi, int n_slots)
+{
+  EF_VI_ASSERT(n_slots >= 0);
+  return vi->evq_vi->ep_state->evq.min_unused_evq_slots >= n_slots;
+}
+
+ci_inline void ef_vi_consume_evq_slots_unchecked(ef_vi* vi, int n_slots)
+{
+  EF_VI_ASSERT(n_slots >= 0);
+  vi->evq_vi->ep_state->evq.min_unused_evq_slots -= n_slots;
+}
+
+ci_inline bool ef_vi_consume_evq_slots(ef_vi* vi, int n_slots)
+{
+  EF_VI_ASSERT(n_slots >= 0);
+
+  if( ! ef_vi_can_consume_evq_slots(vi, n_slots) )
+    return false;
+
+  ef_vi_consume_evq_slots_unchecked(vi, n_slots);
+  EF_VI_ASSERT(vi->evq_vi->ep_state->evq.min_unused_evq_slots >= 0);
+
+  return true;
+}
+
+ci_inline void ef_vi_return_evq_slots(ef_vi* vi, int n_slots)
+{
+  EF_VI_ASSERT(n_slots >= 0);
+  vi->evq_vi->ep_state->evq.min_unused_evq_slots += n_slots;
 }
 
 #endif  /* __CI_EF_VI_INTERNAL_H__ */

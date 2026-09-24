@@ -20,6 +20,7 @@ struct vi_allocate_info {
   int evq_capacity;
   int txq_capacity;
   int rxq_capacity;
+  unsigned evq_reserved_events;
   int wakeup_channel;
   const struct cpumask *irq_affinity;
   struct efrm_vi **virs;

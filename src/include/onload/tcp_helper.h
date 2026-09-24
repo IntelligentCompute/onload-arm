@@ -183,7 +183,6 @@ typedef struct tcp_helper_resource_s {
 #define OO_TRUSTED_LOCK_SWF_UPDATE        0x80
 #define OO_TRUSTED_LOCK_PURGE_TXQS        0x100
 #define OO_TRUSTED_LOCK_PRIME_IF_IDLE     0x200
-#define OO_TRUSTED_LOCK_RX_ACCOUNTING     0x400
 #define OO_TRUSTED_LOCK_REINIT_TXQS       0x800
   volatile unsigned      trusted_lock;
 

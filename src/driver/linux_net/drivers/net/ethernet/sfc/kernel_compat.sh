@@ -44,7 +44,10 @@ EFX_NEED_KTIME_COMPARE			nsymbol	ktime_compare		include/linux/ktime.h
 EFX_NEED_RTC_TIME64_TO_TM		nsymbol	rtc_time64_to_tm	include/linux/rtc.h
 EFX_NEED_SET_NORMALIZED_TIMESPEC	custom
 EFX_NEED_PTP_CLOCK_PPSUSR		custom
-EFX_NEED_KTIME_GET_SNAPSHOT		nsymbol	ktime_get_snapshot	include/linux/timekeeping.h
+EFX_NEED_KTIME_GET_SNAPSHOT_ID		nsymbol	ktime_get_snapshot_id	include/linux/timekeeping.h
+EFX_NEED_SYSTEM_TIME_SNAPSHOT_SYSTIME	nmember	struct_system_time_snapshot	systime	include/linux/timekeeping.h
+EFX_NEED_SYSTEM_TIME_SNAPSHOT_MONORAW	nmember	struct_system_time_snapshot	monoraw	include/linux/timekeeping.h
+EFX_NEED_SYSTEM_DEVICE_CROSSTSTAMP_SYS_SYSTIME	nmember	struct_system_device_crosststamp	sys_systime	include/linux/timekeeping.h
 EFX_HAVE_PTP_CLOCK_GETTIMEX64		member	struct_ptp_clock_info gettimex64	include/linux/ptp_clock_kernel.h
 EFX_NEED_SCALED_PPM_TO_PPB		nsymbol scaled_ppm_to_ppb		include/linux/ptp_clock_kernel.h
 EFX_NEED_SKB_FRAG_OFF			nsymbol	skb_frag_off		include/linux/skbuff.h
@@ -132,6 +135,13 @@ EFX_HAVE_ETHTOOL_FECSTATS_HIST	memtype	struct_ethtool_ops	get_fec_stats	include/
 EFX_HAVE_ETHTOOL_FECPARAM	member	struct_ethtool_ops	get_fecparam	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_RXFH_CONTEXT	member	struct_ethtool_ops	get_rxfh_context	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_RXNFC_CONTEXT	member	struct_ethtool_rxnfc	rss_context	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_GET_RX_RING_COUNT	member	struct_ethtool_ops	get_rx_ring_count	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT	member	struct_ethtool_ops	create_rxfh_context	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_CAP_RXFH_PER_CTX_FIELDS	bitfield	struct_ethtool_ops	rxfh_per_ctx_fields	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_CAP_RXFH_PER_CTX_KEY	bitfield	struct_ethtool_ops	rxfh_per_ctx_key	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_CAP_RSS_RXNFC_ADDS	bitfield	struct_ethtool_ops	cap_rss_rxnfc_adds	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_GET_RXFH_FIELDS	member	struct_ethtool_ops	get_rxfh_fields	include/linux/ethtool.h
+EFX_HAVE_MUTEX_GET_OWNER	symbol	mutex_get_owner	include/linux/mutex.h
 EFX_HAVE_XDP_FRAME_API		symbol	xdp_frame	include/net/xdp.h
 EFX_HAVE_XDP_COVERT_XDP_BUFF_FRAME_API	symbol	xdp_convert_buff_to_frame include/net/xdp.h
 EFX_HAVE_XDP_DATA_META		member	struct_xdp_buff	data_meta	include/linux/filter.h
@@ -168,6 +178,7 @@ EFX_HAVE_TCF_EXTACK			member	struct_tc_cls_common_offload	extack	include/net/pkt
 EFX_HAVE_TC_CAN_EXTACK			symbol	tc_can_offload_extack	include/net/pkt_cls.h
 EFX_HAVE_NETIF_IS_VXLAN			symbol	netif_is_vxlan	include/net/vxlan.h
 EFX_HAVE_NETIF_IS_GENEVE		symbol	netif_is_geneve	include/net/geneve.h
+EFX_NEED_NETIF_CARRIER_EVENT		nsymbol	netif_carrier_event	include/linux/netdevice.h
 EFX_NEED_IDA_ALLOC_RANGE		nsymbol	ida_alloc_range		include/linux/idr.h
 EFX_HAVE_IPV6_STUBS_DST_LOOKUP_FLOW	custom
 EFX_HAVE_SKB__LIST			member	struct_sk_buff	list	include/linux/skbuff.h
@@ -190,7 +201,8 @@ EFX_NEED_DEVLINK_FLASH_UPDATE_TIMEOUT_NOTIFY	nsymbol	devlink_flash_update_timeou
 EFX_HAVE_DEVLINK_ALLOC_DEV		symtype	devlink_alloc		include/net/devlink.h	struct devlink *(const struct devlink_ops *, size_t, struct device *)
 EFX_HAVE_VOID_DEVLINK_REGISTER		symtype	devlink_register	include/net/devlink.h	void(struct devlink *)
 EFX_NEED_ETHTOOL_FLASH_DEVICE		nsymbol devlink_compat_flash_update	include/net/devlink.h
-EFX_HAVE_DEVLINK_HEALTH_REPORTER	symtype	devlink_health_reporter_create	include/net/devlink.h	struct devlink_health_reporter *(struct devlink *, const struct devlink_health_reporter_ops *, u64, void *)
+EFX_HAVE_DEVLINK_HEALTH_REPORTER	symtype	devlink_health_reporter_create	include/net/devlink.h	struct devlink_health_reporter *(struct devlink *, const struct devlink_health_reporter_ops *, void *)
+EFX_HAVE_DEVLINK_HEALTH_REPORTER_OLD	symtype	devlink_health_reporter_create	include/net/devlink.h	struct devlink_health_reporter *(struct devlink *, const struct devlink_health_reporter_ops *, u64, void *)
 EFX_HAVE_VOID_DEVLINK_FMSG_STRING_PUT   symtype devlink_fmsg_string_put include/net/devlink.h void(struct devlink_fmsg *, const char *)
 EFX_HAVE_DEVLINK_HEALTH_REPORTER_OPS_EXTACK memtype struct_devlink_health_reporter_ops diagnose include/net/devlink.h int(*)(struct devlink_health_reporter *, struct devlink_fmsg *,	struct netlink_ext_ack *)
 EFX_HAVE_ETHTOOL_COALESCE_CQE		memtype	struct_ethtool_ops	get_coalesce	include/linux/ethtool.h	int (*)(struct net_device *, struct ethtool_coalesce *, struct kernel_ethtool_coalesce *, struct netlink_ext_ack *)
@@ -238,7 +250,9 @@ EFX_HAVE_NDO_SIOCDEVPRIVATE		member	struct_net_device_ops	ndo_siocdevprivate	inc
 EFX_HAVE_NDO_ETH_IOCTL			member	struct_net_device_ops	ndo_eth_ioctl		include/linux/netdevice.h
 EFX_NEED_NETDEV_HOLD			nsymbol	netdev_hold		include/linux/netdevice.h
 EFX_HAVE_DEV_HOLD_TRACK			symbol	dev_hold_track		include/linux/netdevice.h
+EFX_NEED_SIZE_MUL			nsymbol	size_mul		include/linux/overflow.h
 EFX_NEED_KREALLOC_ARRAY			nsymbol	krealloc_array		include/linux/slab.h
+EFX_NEED_KMALLOC_OBJ			nsymbol	kmalloc_obj		include/linux/slab.h
 EFX_HAVE_VDPA_MGMT_INTERFACE		symbol	vdpa_mgmtdev_register	include/linux/vdpa.h
 EFX_HAVE_IOMMU_CAPABLE			symbol	iommu_capable		include/linux/iommu.h
 EFX_NEED_DEVICE_IOMMU_CAPABLE		nsymbol	device_iommu_capable	include/linux/iommu.h
@@ -257,6 +271,8 @@ EFX_HAVE_IP_TUNNEL_FLAGS_TO_BE16	symbol	ip_tunnel_flags_to_be16	include/net/ip_t
 EFX_NEED_TIME64_TO_TM			nsymbol	time64_to_tm		include/linux/time.h
 EFX_HAVE_ASSIGN_STR_NO_SRC_ARG      custom
 EFX_NEED_TRY_LOOKUP_NOPERM	nsymbol	try_lookup_noperm	include/linux/namei.h
+EFX_HAVE_CXL_H				file				include/cxl/cxl.h
+EFX_HAVE_CXL_SET_CAPACITY		symbol	cxl_set_capacity	include/cxl/cxl.h
 " | grep -E -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 

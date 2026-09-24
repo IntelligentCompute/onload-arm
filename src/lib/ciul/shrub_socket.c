@@ -27,16 +27,21 @@ int ef_shrub_socket_open(uintptr_t* socket_out)
 
 int ef_shrub_socket_close_socket(uintptr_t socket)
 {
-  int rc = ci_sys_close(socket);
-  if( rc < 0 )
+  if( socket == EF_SHRUB_NO_SOCKET || socket == EF_SHRUB_DUMMY_SOCKET )
+    return 0;
+
+  if( ci_sys_close(socket) < 0 )
     return -errno;
+
   return 0;
 }
 
 int ef_shrub_socket_close_file(uintptr_t file)
 {
-  int rc = ci_sys_close(file);
-  if( rc < 0 )
+  if( file == EF_SHRUB_NO_SOCKET || file == EF_SHRUB_DUMMY_SOCKET )
+    return 0;
+
+  if( ci_sys_close(file) < 0 )
     return -errno;
   return 0;
 }

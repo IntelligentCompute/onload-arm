@@ -484,6 +484,12 @@ enum ef_filter_flags {
    ** exclusive queues but is capable of sharing RXQs.
    */
   EF_FILTER_FLAG_SHARED_RXQ        = 0x8,
+  /** If set, the hardware receive queue will generate wakeup events,
+   ** allowing the application to block for new packets using
+   ** ef_vi_prime() and epoll. Without this flag, the queue will use
+   ** the default event behaviour for the NIC arch.
+   */
+  EF_FILTER_FLAG_REQUEST_WAKEUPS   = 0x10,
 };
 
 /*! \brief Specification of a filter */

@@ -98,9 +98,10 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
                   struct efrm_vi *evq_virs,
                   unsigned vi_flags,
                   int evq_capacity, int txq_capacity, int rxq_capacity,
-                  int tx_q_tag, int rx_q_tag,
+                  int tx_q_tag, int rx_q_tag, unsigned *evq_reservation_out,
                   struct efrm_vi **virs_out)
 {
+  unsigned evq_reservation;
   struct efhw_nic *nic;
   struct efrm_vi *virs;
   int rc;
@@ -139,16 +140,26 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
     goto fail_q_alloc;
   }
 
+  /* We take one less than the actual reserved amount here to maintain the old
+   * queue sizing behaviour. */
+  evq_reservation = efhw_get_evq_reserved_slots(nic, vi_flags) - 1;
+
+  /* evq_capacity < 0 indicates an extra reservation, with the reserved amount
+   * being "0 reserved slots" at evq_capacity = -1. */
+  if( evq_capacity < 0 )
+    evq_reservation += -evq_capacity - 1;
+
   /* Size EVQ sensibly based on RX and TX Q sizes */
   if (evq_virs == NULL && evq_capacity < 0) {
+    /* Limit the size to the largest size that is both supported by the NIC
+     * and representable by `int`. */
+    int evq_max = 1 << ci_log2_le(nic->q_sizes[EFHW_EVQ] & INT_MAX);
+
     if (vi_flags & EFHW_VI_RX_PACKED_STREAM) {
       evq_capacity = 32 * 1024;
     }
     else if( nic->flags & NIC_FLAG_RX_SHARED ) {
-      /* evq_capacity<0 indicates an additional reserve. See below. */
-      evq_capacity = txq_capacity - evq_capacity - 1;
-      if (vi_flags & EFHW_VI_TX_TIMESTAMPS)
-        evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
+      evq_capacity = txq_capacity + evq_reservation;
     }
     else if (vi_flags & (EFHW_VI_TX_TIMESTAMPS | EFHW_VI_TX_ALT)) {
       if (txq_capacity == 0) {
@@ -159,22 +170,15 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
        * Take into account additional capacity to reserve as indicated by
        * evq_capacity.
        */
-      evq_capacity = rxq_capacity + 3 * txq_capacity - evq_capacity - 1;
-
-      /* Reserve space for time sync events. */
-      if( vi_flags & (EFHW_VI_TX_TIMESTAMPS | EFHW_VI_RX_TIMESTAMPS) )
-        evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
-    }
-    else if (vi_flags & EFHW_VI_RX_TIMESTAMPS) {
-      evq_capacity = rxq_capacity + txq_capacity - evq_capacity - 1;
-      /* Reserve space for time sync events. */
-      evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
+      evq_capacity = rxq_capacity + 3 * txq_capacity + evq_reservation;
     }
     else {
-      evq_capacity = rxq_capacity + txq_capacity - evq_capacity - 1;
+      evq_capacity = rxq_capacity + txq_capacity + evq_reservation;
     }
     if (evq_capacity == 0)
       evq_capacity = -1;
+    if (evq_capacity > evq_max)
+      evq_capacity = evq_max;
   }
 
   /* If the user requested a shared EVQ, but we don't support this, then exit
@@ -203,6 +207,9 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
   if (!virs->ep_state)
     goto fail_q_alloc;
 
+  /* We store one less than the actual reservation, so make sure we return the
+   * actual reserved amount. */
+  *evq_reservation_out = evq_reservation + 1;
   *virs_out = virs;
   return 0;
 
@@ -247,6 +254,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   struct efrm_resource *vi_set = NULL;
   struct efrm_resource *evq = NULL;
   struct efrm_resource *pd = NULL;
+  unsigned evq_reservation = 0;
   struct efrm_client *client;
   struct efrm_vi *virs = NULL;
   struct efrm_vi_attr attr;
@@ -328,7 +336,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
                          alloc_in->evq_capacity,
                          alloc_in->txq_capacity, alloc_in->rxq_capacity,
                          alloc_in->tx_q_tag, alloc_in->rx_q_tag,
-                         &virs);
+                         &evq_reservation, &virs);
   CI_DEBUG(alloc_in = NULL);
   if( client != NULL )
     efrm_client_put(client);
@@ -346,6 +354,15 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   }
   if (rc != 0)
     goto fail3;
+
+  /* If we allocated an EVQ, then we must have allocated one large enough
+   * to actually fill it with events that we want instead of having every
+   * slot reserved. */
+  if (virs->q[EFHW_EVQ].capacity != 0 &&
+      evq_reservation >= virs->q[EFHW_EVQ].capacity) {
+    rc = -ENOSPC;
+    goto fail4;
+  }
 
   efch_filter_list_init(&rs->vi.fl);
   rs->vi.sniff_flags = 0;
@@ -375,6 +392,9 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   alloc_out->out_flags = virs->out_flags;
   alloc_out->out_flags |= EFHW_VI_PS_BUF_SIZE_SET;
   alloc_out->ps_buf_size = virs->ps_buf_size;
+  /* We make sure we have number of events >0 above, otherwise the user could
+   * not really do anything with this VI. */
+  alloc_out->evq_max_user_events = alloc_out->evq_capacity - evq_reservation;
 
   EFCH_TRACE("%s: Allocated "EFRM_RESOURCE_FMT" rc=%d", __FUNCTION__,
              EFRM_RESOURCE_PRI_ARG(&virs->rs), rc);

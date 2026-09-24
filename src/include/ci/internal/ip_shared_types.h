@@ -904,14 +904,11 @@ typedef struct {
 #define CI_EPLOCK_NETIF_NEED_SOCK_BUFS     0x0002000000000000ULL
   /* if CI_EPLOCK_NETIF_NEED_POLL did nothing then prime */
 #define CI_EPLOCK_NETIF_PRIME_IF_IDLE      0x0000800000000000ULL
-  /* we have just allocated a new EFCT RXQ and need to perform some accounting
-   * to update the number of packets to enable rx buffer posting */
-#define CI_EPLOCK_NETIF_RX_ACCOUNTING      0x0000400000000000ULL
   /* some of our queues saw a TX error event and need to be reinitialised */
 #define CI_EPLOCK_NETIF_REINIT_TXQS        0x0000200000000000ULL
 
   /* mask for the above flags that must be handled before dropping lock */
-# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff3be00000000000ULL
+# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff3ba00000000000ULL
 
   /* these flags can be handled in UL */
 #define CI_EPLOCK_NETIF_UL_COMMON_MASK \
@@ -986,9 +983,11 @@ typedef struct {
   CI_ULCONST ci_uint32  vi_io_mmap_bytes;
   CI_ULCONST ci_uint32  vi_efct_shm_mmap_bytes;
   CI_ULCONST ci_uint32  vi_evq_bytes;
+  CI_ULCONST ci_uint16  vi_evq_reserved_slots;
   CI_ULCONST ci_uint16  vi_instance;
   CI_ULCONST ci_uint16  vi_rxq_size;
   CI_ULCONST ci_uint16  vi_txq_size;
+  CI_ULCONST ci_uint16  vi_tx_max_frame_len;
   CI_ULCONST ci_uint16  vi_channel_or_irq;
   CI_ULCONST ci_uint8   vi_arch;
   CI_ULCONST ci_uint8   vi_variant;
@@ -1016,6 +1015,7 @@ typedef struct {
 #endif
 
 # define CI_NETIF_NIC_ERROR_REMAP               0x00000001u
+# define CI_NETIF_NIC_ERROR_AWAITING_EFCT       0x00000002u
   ci_uint32             nic_error_flags;
 #if CI_CFG_CTPIO
   ci_uint32             ctpio_ct_threshold;
@@ -1026,6 +1026,7 @@ typedef struct {
   ci_uint32             ctpio_max_frame_len;
 #endif
   bool                  shrub_queues[EF_VI_MAX_EFCT_RXQS];
+  ef_vi_stats           vi_stats CI_ALIGN(8);
 } ci_netif_state_nic_t;
 
 
@@ -1101,10 +1102,6 @@ struct ci_netif_state_s {
    * interfaces have deferred their priming due to lock contention.
    */
   ci_uint32             evq_prime_deferred;
-
-  /* This tracks which interfaces have had an EFCT RXQ allocated, but need
-   * the stack lock to update n_evq_rx_pkts in a VI's RXQ state. */
-  ci_atomic_t           efct_rxq_deferred_superbufs[CI_CFG_MAX_INTERFACES];
 
   /* hwports accelerated by the stack */
   cicp_hwport_mask_t    tx_hwport_mask;
@@ -1377,7 +1374,6 @@ struct ci_netif_state_s {
   volatile ci_uint16    dump_write_i;
 #endif
 
-  ef_vi_stats           vi_stats CI_ALIGN(8);
 
   CI_ULCONST ci_int32   creation_numa_node;
   CI_ULCONST ci_int32   load_numa_node;
@@ -1719,6 +1715,7 @@ typedef struct {
 #define CI_IP_CACHE_REQUEST_HWPORT     2
 
   ci_mtu_t        mtu;
+  ci_mtu_t        unconstrained_mtu;
   ci_ifid_t       ifindex;
   cicp_encap_t    encap;
   ci_int16        intf_i;

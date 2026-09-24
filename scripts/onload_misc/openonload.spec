@@ -106,8 +106,6 @@
 %define debug_package %{nil}
 %endif
 
-%global __python %{__python3}
-
 ###############################################################################
 
 Summary:          OpenOnload user-space
@@ -121,6 +119,9 @@ Vendor:           Advanced Micro Devices, Inc.
 Provides:         openonload = %{version}-%{release}
 Provides:         user(onload_cplane)
 Provides:         group(onload_cplane)
+Provides:         user(onload_shrub)
+Provides:         group(onload_shrub)
+Provides:         group(onload_users)
 %if 0%{?rhel} >= 8
 Recommends:       openonload-devel = %{version}-%{release}
 %endif
@@ -130,12 +131,19 @@ AutoReqProv:      no
 ExclusiveArch:    x86_64 ppc64
 Requires(pre):    shadow-utils
 
-%global base_build_requires gawk gcc sed make bash automake libtool autoconf
+%global base_build_requires gawk gcc sed make bash
 BuildRequires:    %{base_build_requires}
 
-%global user_build_requires libpcap-devel libcap-devel python3-devel
 %if %{with user}
-BuildRequires:    %{user_build_requires}
+BuildRequires:    libpcap-devel
+BuildRequires:    libcap-devel
+BuildRequires:    python%{python3_pkgversion}-devel
+BuildRequires:    python%{python3_pkgversion}-setuptools
+%if 0%{?rhel} >= 10
+BuildRequires:    python%{python3_pkgversion}-wheel
+BuildRequires:    pyproject-rpm-macros
+BuildRequires:    systemd-rpm-macros
+%endif
 %endif
 
 %description
@@ -230,7 +238,7 @@ fi
 %if %{with akmod}
 %package akmod
 Summary:          OpenOnload kernel modules as Akmod source
-Requires:         akmods %{base_build_requires} %{user_build_requires} %{?efct_build_requires:%efct_build_requires}
+Requires:         akmods %{base_build_requires} %{?efct_build_requires:%efct_build_requires}
 Conflicts:        kernel-module-sfc-RHEL%{maindist}
 Provides:         openonload-kmod = %{version}-%{release}
 Provides:         sfc-kmod-symvers = %{version}-%{release}
@@ -362,6 +370,14 @@ to build efsend_cplane.
 %prep
 [ "$RPM_BUILD_ROOT" != / ] && rm -rf "$RPM_BUILD_ROOT"
 %setup -q -n %{name}-%{pkgversion}
+sed 's@py_modules@package_dir={"": "scripts"},py_modules@' < scripts/onload_misc/setup.py > setup.py
+
+%if %{with user}
+%if 0%{?rhel} >= 10
+%generate_buildrequires
+%pyproject_buildrequires
+%endif
+%endif
 
 %build
 %if %{with kmod}
@@ -397,6 +413,13 @@ export HAVE_EFCT=%{?have_efct:%have_efct}
 mkdir build
 %endif
 %endif
+%if %{with user}
+%if 0%{?rhel} >= 10
+%pyproject_wheel
+%else
+%py3_build
+%endif
+%endif
 
 %install
 %if %{with user}%{with kmod}%{with devel}%{with examples}
@@ -413,6 +436,13 @@ mkdir -p "$i_prefix/etc/depmod.d"
   %{?have_sdci: --have-sdci}
 %endif
 %if %{with user}
+%if 0%{?rhel} >= 10
+%pyproject_install
+%else
+%py3_install
+%endif
+sed -s -i -E '1s|^#![[:space:]]*(/usr)?/bin/(env[[:space:]]+)?python3|#!/usr/libexec/platform-python|; t; 1q1' \
+  $i_prefix%{_sbindir}/sfcirqaffinity $i_prefix%{_sbindir}/sfcaffinity_config
 # Removing these files is fine since they would only ever be generated on a build machine.
 rm -f "$i_prefix/etc/sysconfig/modules/onload.modules"
 rm -f "$i_prefix/usr/local/lib/modules-load.d/onload.conf"
@@ -453,13 +483,6 @@ mkdir -p %{buildroot}%{_usrsrc}
 tar xf %{SOURCE0} -C %{buildroot}%{_usrsrc}
 %endif
 
-%pre
-getent group onload_cplane >/dev/null || groupadd -r onload_cplane
-getent passwd onload_cplane >/dev/null || \
-  useradd -r -g onload_cplane -M -d /run/openonload -s /usr/sbin/nologin \
-  -c "%{name} Control Plane" onload_cplane
-exit 0
-
 %post
 
 if [ `cat /proc/1/comm` == systemd ]
@@ -471,7 +494,6 @@ else
   cp /usr/share/onload/sysconfig_onload_modules /etc/sysconfig/modules/onload.modules
 fi
 
-/sbin/onload_tool add_cplane_user
 ldconfig -n %{_libdir}
 
 %preun
@@ -528,10 +550,8 @@ rm -fR $RPM_BUILD_ROOT
 /usr/share/onload/onload_modules-load.d.conf
 /usr/share/onload/sysconfig_onload_modules
 
-%{python3_sitelib}/sfc*.py
-%{python3_sitelib}/__pycache__/sfc*.pyc
-%{python3_sitelib}/*Onload*.egg-info
-%{python_sitearch}/solar_clusterd/
+%pycached %{python3_sitelib}/sfc*.py
+%{python3_sitelib}/*Onload*.*-info
 %endif
 
 %changelog

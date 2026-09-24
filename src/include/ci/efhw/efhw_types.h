@@ -525,21 +525,12 @@ struct efhw_func_ops {
 
   /*-------------- superbufs ------------------------ */
 
-	/*! Provides the address (if present) of the io area for the receive
-	 * window containing the RX_BUFFER_POST register of the requested rxq.
-	 * addr_out is only valid when the return value is 0.
-	 * Returns 0 on success.
-	 * Returns negative error on other failure. */
-	int (*rxq_window)(struct efhw_nic* nic, int instance,
-                          resource_size_t* addr_out);
-
 	/*! Posts a superbuf to the nic.
 	 * Returns 0 on success, a negative error otherwise. */
 	int (*post_superbuf)(struct efhw_nic* nic, int instance,
 			     resource_size_t dma_addr, bool sentinel,
 			     bool rollover, int owner_id);
 
-	int (*shared_rxq_alloc)(struct efhw_nic* nic);
 	int (*shared_rxq_bind)(struct efhw_nic* nic,
 			       struct efhw_shared_bind_params *params);
 	/*! Unbind from a shared rxq.
@@ -572,6 +563,9 @@ struct efhw_func_ops {
 	 * queues are attached-to by multiple clients and they're read-only to
 	 * all of them. */
 	size_t (*max_shared_rxqs)(struct efhw_nic* nic);
+
+	/*! Architecture specific number of reserved slots in an EVQ. */
+	uint32_t (*evq_reserved_slots)(struct efhw_nic* nic);
 
   /*-------------- pio ------------------------ */
 
@@ -639,6 +633,7 @@ struct efhw_nic {
 # define NIC_RESETTING_FLAG_VANISHED    0x00000004
 
 	unsigned mtu;		/*!< MAC MTU (includes MAC hdr) */
+	unsigned max_tx_mtu;	/*!< limit imposed by NIC, zero if no limit */
 
 	/*! Bus for hotplug purposes, as we can't rely on pci_dev->bus. */
 	unsigned char bus_number;

@@ -1032,10 +1032,14 @@ oo_design_parameters_rsop(ci_private_t* priv, void *arg)
 static int
 oo_reinit_txq_rsop(ci_private_t* priv, void* arg)
 {
+#if ! CI_CFG_UL_INTERRUPT_HELPER
   oo_reinit_txq_t* op = (oo_reinit_txq_t*)arg;
   if (priv->thr == NULL)
     return -EINVAL;
   return efab_tcp_helper_reinit_txq(priv->thr, op->intf_i);
+#else
+  return -ENOSYS;
+#endif
 }
 
 static int
@@ -1142,13 +1146,6 @@ static DEFINE_MUTEX(ctor_mutex);
   rc = tcp_helper_alloc_ul(alloc, -1, &trs);
   if( rc == 0 ) {
     rc = oo_priv_set_stack(priv, trs);
-
-    /* Initially lock the stack in case there are user-allocated resources
-     * which need to be in place before other processes can attach to the
-     * stack. We lock it here, while guarded by `ctor_mutex`, and the lock
-     * must be released once it's safe to attach. */
-    if( rc == 0 )
-      rc = ci_netif_lock(&trs->netif);
 
     if( rc == 0 ) {
       priv->fd_flags = OO_FDFLAG_STACK;

@@ -11,7 +11,7 @@ SUBDIRS		+= cplane
 endif
 
 SUBDIRS		+= onload_helper ip \
-		   solar_clusterd onload_remote_monitor \
+		   onload_remote_monitor \
 		   onload_mibdump shrub_controller onload_shrubdump
 
 endif

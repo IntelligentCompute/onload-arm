@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <etherfabric/internal/shrub_adapter.h>
+#include <etherfabric/internal/shrub_client.h>
 #include <etherfabric/internal/shrub_shared.h>
 #include <etherfabric/internal/shrub_socket.h>
 #include <net/if.h>
@@ -24,7 +25,7 @@ int ef_shrub_adapter_send_request(int controller_id,
 {
   int rc;
   int received_bytes = 0;
-  uintptr_t client_fd = 0;
+  uintptr_t client_fd = EF_SHRUB_NO_SOCKET;
   char socket_path[EF_SHRUB_NEGOTIATION_SOCKET_LEN];
 
   rc = snprintf(socket_path, sizeof(socket_path), EF_SHRUB_CONTROLLER_PATH_FORMAT
@@ -52,7 +53,7 @@ int ef_shrub_adapter_send_request(int controller_id,
   rc = received_bytes;
 
 clean_exit:
-  if ( client_fd != 0 )
+  if ( client_fd != EF_SHRUB_NO_SOCKET )
     ef_shrub_socket_close_socket(client_fd);
   return rc;
 }
@@ -97,17 +98,6 @@ int ef_shrub_adapter_send_ifname(ef_shrub_request_sender send_request_func,
     return -errno;
   return ef_shrub_adapter_send_ifindex(send_request_func, controller_id,
                                        ifindex, buffers);
-}
-
-int ef_shrub_adapter_send_dump(ef_shrub_request_sender send_request_func,
-                               int controller_id, const char *filename)
-{
-  struct ef_shrub_controller_request request = {0};
-  request.controller_version = EF_SHRUB_VERSION;
-  request.command = EF_SHRUB_CONTROLLER_DUMP_TO_FILE;
-  strncpy(request.dump.file_name, filename, EF_SHRUB_DUMP_LOG_SIZE - 1);
-  request.dump.file_name[EF_SHRUB_DUMP_LOG_SIZE - 1] = '\0';
-  return send_request_func(controller_id, &request);
 }
 
 int ef_shrub_adapter_stop_server(ef_shrub_request_sender send_request_func,

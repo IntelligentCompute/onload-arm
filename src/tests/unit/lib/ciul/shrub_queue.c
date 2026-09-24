@@ -93,6 +93,11 @@ shrub_connection_to_mock_connection(struct ef_shrub_connection* shrub_conn)
          );
 }
 
+void efct_ubufs_set_is_shrub_controller(struct ef_vi* vi)
+{
+  (void)vi;
+}
+
 static int mock_attach(struct ef_vi* vi_, int qid_, int buf_fd,
                        unsigned n_superbufs, bool shared, bool interrupt, int* qid_out)
 {

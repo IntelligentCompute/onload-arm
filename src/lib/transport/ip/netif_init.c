@@ -297,7 +297,9 @@ static ci_uint32 citp_auto_flowlabels = CI_AUTO_FLOWLABELS_DEFAULT;
 /* Interface for sysctl. */
 ci_inline int ci_sysctl_get_values(char *path, ci_uint32 *ret, int n)
 {
-  char name[CI_CFG_PROC_PATH_LEN_MAX + strlen(CI_CFG_PROC_PATH)];
+  /* sizeof not strlen: strlen is not a constant expression in C.  The extra
+   * byte from the null terminator provides space for the path's terminator. */
+  char name[CI_CFG_PROC_PATH_LEN_MAX + sizeof(CI_CFG_PROC_PATH)];
   char buf[CI_CFG_PROC_LINE_LEN_MAX];
   int buflen;
   char *p = buf;
@@ -1272,13 +1274,15 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   handle_str_opt(opts, "EF_ONLOAD_IRQ_CORES", opts->onload_irq_cores,
                  sizeof(opts->onload_irq_cores));
 
-  static const char* const multiarch_tx_opts[] = { "enterprise", "express", 0 };
+  static const char* const multiarch_tx_opts[] = { "enterprise", "express",
+                                                   "auto", 0 };
   opts->multiarch_tx_datapath =
-    parse_enum(opts, "EF_TX_DATAPATH", multiarch_tx_opts, "express");
+    parse_enum(opts, "EF_TX_DATAPATH", multiarch_tx_opts, "auto");
 
-  static const char* const multiarch_rx_opts[] = { "enterprise", "express", "both", 0 };
+  static const char* const multiarch_rx_opts[] = { "enterprise", "express",
+                                                   "auto", "both", 0 };
   opts->multiarch_rx_datapath =
-    parse_enum(opts, "EF_RX_DATAPATH", multiarch_rx_opts, "both");
+    parse_enum(opts, "EF_RX_DATAPATH", multiarch_rx_opts, "auto");
 
   if( (s = getenv("EF_KERNEL_PACKETS_BATCH_SIZE")) )
     opts->kernel_packets_batch_size = atoi(s);
@@ -1986,6 +1990,7 @@ static int oo_efct_superbuf_config_refresh(ef_vi* vi, int ix)
   op.max_superbufs = CI_EFCT_MAX_SUPERBUFS;
   CI_USER_PTR_SET(op.superbufs, vi->efct_rxqs.q[ix].superbuf);
   CI_USER_PTR_SET(op.current_mappings, vi->efct_rxqs.q[ix].mappings);
+  op.superbuf_pkts = 0;  /* don't set superbuf_pkts (already set or N/A) */
   rc = oo_resource_op(vi->dh, OO_IOC_EFCT_SUPERBUF_CONFIG_REFRESH, &op);
 
   /* Map the rx buffer post register now if needed. It couldn't be done
@@ -1993,7 +1998,8 @@ static int oo_efct_superbuf_config_refresh(ef_vi* vi, int ix)
    * about to start polling the queue. */
   if( rc == 0 &&
       vi->vi_flags & EF_VI_RX_PHYS_ADDR &&
-      vi->efct_rxqs.ops->post != NULL )
+      vi->efct_rxqs.ops->post != NULL &&
+      efct_ubufs_rxq_is_local(vi, ix) )
   {
     void *p;
     rc = oo_resource_mmap(vi->dh, OO_MMAP_TYPE_UBUF_POST,
@@ -2200,6 +2206,9 @@ static int alloc_efct_shared_rxq(ci_netif* ni, uint32_t nic_i)
   unsigned shared_rxq_token;
   bool use_interrupts;
   ef_vi* vi = ci_netif_vi(ni, nic_i);
+  uint32_t superbuf_pkts;
+  int hw_qid;
+  oo_efct_superbuf_config_refresh_t op;
 
   rc = efct_ubufs_get_shared_filter_info(vi, &shared_rxq_token,
                                          &use_interrupts);
@@ -2221,16 +2230,45 @@ static int alloc_efct_shared_rxq(ci_netif* ni, uint32_t nic_i)
   qix = rc;
 
   rc = efct_ubufs_shared_attach_internal(vi, qix, -1,
-                                         (void*)vi->efct_rxqs.q[qix].superbuf);
+                                         (void*)vi->efct_rxqs.q[qix].superbuf,
+                                         &superbuf_pkts, &hw_qid);
   if( rc < 0 )
     return rc;
+
+  /* Trigger kernel superbuf mapping via ioctl. The kernel will also set
+   * superbuf_pkts in shared memory after mapping succeeds. */
+  op.intf_i = vi->efct_rxqs.ops->user_data;
+  op.qid = qix;
+  op.max_superbufs = CI_EFCT_MAX_SUPERBUFS;
+  CI_USER_PTR_SET(op.superbufs, vi->efct_rxqs.q[qix].superbuf);
+  CI_USER_PTR_SET(op.current_mappings, vi->efct_rxqs.q[qix].mappings);
+  op.superbuf_pkts = superbuf_pkts;
+  rc = oo_resource_op(vi->dh, OO_IOC_EFCT_SUPERBUF_CONFIG_REFRESH, &op);
+  if( rc < 0 )
+    goto fail_detach;
+
+  efct_ubufs_release_shrub_fds(vi, qix);
+
+  /* Now kernel superbufs are mapped and superbuf_pkts is set in shared memory.
+   * Sync the userspace vi's rxq_ptr state. */
+  rc = efct_vi_sync_rxq(vi, qix, hw_qid);
+  if( rc < 0 )
+    goto fail_detach;
+
+  /* Activate queue for the poll path only after both kernel and userspace
+   * state is fully initialised. */
+  ci_wmb();
+  vi->ep_state->rxq.efct_active_qs |= 1u << qix;
 
   rc = set_shrub_token(ni, nic_i, qix, shared_rxq_token);
   if( rc < 0 )
-    /* TODO: detach on failure */
-    return rc;
+    goto fail_detach;
 
   return 0;
+
+fail_detach:
+  vi->efct_rxqs.ops->detach(vi, qix);
+  return rc;
 }
 
 static int init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
@@ -2238,12 +2276,15 @@ static int init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
                       char** vi_mem_ptr,
                       ef_vi* vi, unsigned vi_instance,
                       int evq_bytes, int txq_size, ef_vi_stats* vi_stats,
-                      struct efab_nic_design_parameters* dp, ci_hwport_id_t hw_port)
+                      struct efab_nic_design_parameters* dp,
+                      ci_hwport_id_t hw_port,
+                      unsigned evq_reserved_slots)
 {
   ef_vi_state* state = (void*) ((char*) ni->state + vi_state_offset);
   ci_netif_state_nic_t* nsn = &(ni->state->nic[nic_i]);
   uint32_t* ids = (void*) (state + 1);
   unsigned vi_bar_off = vi_instance * 8192;
+  unsigned evq_size = evq_bytes / 8;
   int rc;
 
   rc = ef_vi_init(vi, ef_vi_arch_from_efhw_arch(nsn->vi_arch), nsn->vi_variant,
@@ -2255,23 +2296,24 @@ static int init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   ef_vi_init_timer(vi, nsn->timer_quantum_ns);
   vi->vi_i = vi_instance;
   vi->dh = ci_netif_get_driver_handle(ni);
-  *vi_mem_ptr = ef_vi_init_qs(vi, *vi_mem_ptr, ids, evq_bytes / 8,
+  *vi_mem_ptr = ef_vi_init_qs(vi, *vi_mem_ptr, ids, evq_size,
+                              evq_size - evq_reserved_slots,
                               nsn->vi_rxq_size, nsn->rx_prefix_len, txq_size);
   if( vi->internal_ops.design_parameters ) {
     rc = vi->internal_ops.design_parameters(vi, dp);
     if( rc < 0 )
       return rc;
   }
-  if( vi->efct_rxqs.active_qs ) {
+  if( (nsn->vi_rxq_size > 0) && vi->efct_rxqs.active_qs ) {
     rc = 0;
-    if( nsn->vi_arch == EFHW_ARCH_EFCT ) {
+    if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_KERNEL_SHARED ) {
       rc = efct_kbufs_init_internal(vi,
                         (void*)((char*)ni->efct_shm_ptr + vi_efct_shm_offset),
                         NULL);
       vi->efct_rxqs.ops->refresh = oo_efct_superbuf_config_refresh;
       vi->efct_rxqs.ops->user_data = nic_i;
-    } else if( NI_OPTS(ni).multiarch_rx_datapath != EF_MULTIARCH_DATAPATH_FF &&
-               nsn->vi_arch == EFHW_ARCH_EF10CT ) {
+    }
+    else if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_SHARED ) {
       rc = efct_ubufs_init_internal(vi);
       if( rc < 0 )
         return rc;
@@ -2394,6 +2436,7 @@ static int netif_tcp_helper_build(ci_netif* ni)
 #if CI_CFG_CTPIO
   unsigned ctpio_io_offset = 0;
 #endif
+  int max_init_vi = -1;
 
   /****************************************************************************
    * Do other mmaps.
@@ -2446,9 +2489,12 @@ static int netif_tcp_helper_build(ci_netif* ni)
                     vi_efct_shm_offset,
                     &vi_mem_ptr, vi, nsn->vi_instance,
                     nsn->vi_evq_bytes, nsn->vi_txq_size,
-                    &ni->state->vi_stats, &dp, ns->intf_i_to_hwport[nic_i]);
+                    &ni->state->nic[nic_i].vi_stats, &dp,
+                    ns->intf_i_to_hwport[nic_i], nsn->vi_evq_reserved_slots);
     if( rc )
       goto fail2;
+    max_init_vi = nic_i;
+
     if( NI_OPTS(ni).tx_push )
       ef_vi_set_tx_push_threshold(vi, NI_OPTS(ni).tx_push_thresh);
 
@@ -2584,7 +2630,9 @@ static int netif_tcp_helper_build(ci_netif* ni)
 fail3:
   CI_FREE_OBJ(ni->pkt_bufs);
 fail2:
-  cleanup_all_vis(ni);
+  OO_STACK_FOR_EACH_INTF_I(ni, nic_i)
+    if( nic_i <= max_init_vi )
+      cleanup_ef_vi(ci_netif_vi(ni, nic_i));
 fail1:
   return rc;
 }
@@ -2595,21 +2643,30 @@ fail1:
 
 #ifndef __KERNEL__
 
+static bool want_user_efct_rx_resources(ci_netif* ni, int intf_i)
+{
+  ci_netif_state_nic_t* nsn = &ni->state->nic[intf_i];
+  uint32_t shared_rx_mask = OO_VI_FLAGS_RX_SHARED |
+                            OO_VI_FLAGS_RX_KERNEL_SHARED;
+  bool user_rx = (nsn->oo_vi_flags & shared_rx_mask) ==
+                 OO_VI_FLAGS_RX_SHARED;
+
+  return (nsn->vi_rxq_size > 0) && user_rx;
+}
+
 static int restore_efct_resources(ci_netif* ni)
 {
   int rc, nic_i;
 
-  ci_netif_lock(ni);
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
     ef_vi* vi = ci_netif_vi(ni, nic_i);
 
-    rc = efct_superbuf_config_refresh_all(vi);
-    if( rc < 0 ) {
-      ci_netif_unlock(ni);
-      return rc;
+    if( want_user_efct_rx_resources(ni, nic_i) ) {
+      rc = efct_superbuf_config_refresh_all(vi);
+      if( rc < 0 )
+        return rc;
     }
   }
-  ci_netif_unlock(ni);
   return 0;
 }
 
@@ -2720,15 +2777,14 @@ static void init_resource_alloc(ci_resource_onload_alloc_t* ra,
 static int alloc_efct_resources(ci_netif* ni)
 {
   int rc, nic_i;
+  unsigned efct_interfaces = 0;
+  unsigned tmp;
+  bool need_prime = false;
 
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
-    ci_netif_state_nic_t* nsn = &(ni->state->nic[nic_i]);
     ef_vi* vi = ci_netif_vi(ni, nic_i);
 
-    /* FIXME shouldn't have architecture check here */
-    if( vi->efct_rxqs.active_qs &&
-        NI_OPTS(ni).multiarch_rx_datapath != EF_MULTIARCH_DATAPATH_FF &&
-        nsn->vi_arch == EFHW_ARCH_EF10CT ) {
+    if( want_user_efct_rx_resources(ni, nic_i) ) {
 
       if( ! NI_OPTS(ni).shrub_unicast ) {
         rc = alloc_efct_exclusive_rxq(ni, nic_i);
@@ -2745,7 +2801,33 @@ static int alloc_efct_resources(ci_netif* ni)
       rc = efct_superbuf_config_refresh_all(vi);
       if( rc < 0 )
         return rc;
+
+      efct_interfaces |= 1u << nic_i;
     }
+  }
+
+  if( efct_interfaces ) {
+    /* All EFCT resources for this NIC are initialised. We missed the
+     * prime on init that would normally be done, so need to do that now.
+     * Because this requires a syscall for NICs that require in kernel prime we do
+     * all the attaches first then trigger the prime once everything's set up. */
+    ci_netif_lock(ni);
+
+    OO_FOR_EACH_BIT(efct_interfaces, tmp, nic_i) {
+      ci_netif_state_nic_t* nsn = &(ni->state->nic[nic_i]);
+      ci_wmb();
+      ci_atomic32_and(&nsn->nic_error_flags,
+                      ~CI_NETIF_NIC_ERROR_AWAITING_EFCT);
+      if( ci_bit_test_and_clear(&ni->state->evq_primed, nic_i) ) {
+        ci_bit_set(&ni->state->evq_prime_deferred, nic_i);
+        need_prime = true;
+      }
+    }
+
+    if( need_prime )
+      ef_eplock_holder_set_single_flag(&ni->state->lock,
+                                       CI_EPLOCK_NETIF_NEED_PRIME);
+    ci_netif_unlock(ni);
   }
 
   return 0;
@@ -2831,7 +2913,6 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
                         ra.out_netif_mmap_bytes, OO_MMAP_FLAG_DEFAULT, &p);
   if( rc < 0 ) {
     LOG_E(ci_log("%s: oo_resource_mmap %d", __FUNCTION__, rc));
-    ci_netif_unlock(ni);
     return rc;
   }
 
@@ -2863,11 +2944,9 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
     goto fail;
   }
 
-  ci_netif_unlock(ni);
   return 0;
 
 fail:
-  ci_netif_unlock(ni);
   netif_tcp_helper_munmap(ni);
   return rc;
 }

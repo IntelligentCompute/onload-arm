@@ -28,11 +28,7 @@
  * match the kernel function's name rather than the underscored intrinsic. */
 #define movdir64b _movdir64b
 #endif /* __KERNEL__ */
-#define EFCT_TX_CHUNK_SIZE (EF_VI_CACHE_LINE_SIZE)
-#else /* CI_CFG_CXL */
-#define EFCT_TX_CHUNK_SIZE (sizeof(efct_tx_aperture_t))
 #endif /* CI_CFG_CXL */
-#define EFCT_TX_TAIL_SIZE (EFCT_TX_CHUNK_SIZE / (sizeof(efct_tx_aperture_t)))
 
 #define EF_VI_EVENT_OFFSET(q, i)                                \
   (((q)->ep_state->evq.evq_ptr + (i) * sizeof(ef_vi_qword)) &   \
@@ -49,12 +45,6 @@
 #define EF_VI_EVQ_PHASE(q, i)                                     \
   ((((q)->ep_state->evq.evq_ptr + sizeof(ef_vi_qword) * (i)) &    \
     ((q)->evq_mask + 1)) != 0)
-
-#define EFCT_RXQ_STAT_INC(vi, ix, counter) \
-  do { \
-    if ((vi)->vi_stats) \
-      (vi)->vi_stats->efct_rxq_stats[ix].counter++; \
-  } while(0)
 
 static int efct_ef_eventq_has_many_events(const ef_vi* vi, int n_events)
 {
@@ -88,8 +78,10 @@ static int efct_ef_eventq_has_many_events(const ef_vi* vi, int n_events)
 #define PKT_ID_RXQ_BITS   3
 #define PKT_ID_TOTAL_BITS (PKT_ID_PKT_BITS + PKT_ID_SBUF_BITS + PKT_ID_RXQ_BITS)
 
-/* Enforce compile-time restrictions on the pkt_id fields */
-static inline void assert_pkt_id_fields(void)
+/* Enforce compile-time restrictions on the pkt_id fields. Never called;
+ * exists only to host EF_VI_BUILD_ASSERT()s in a place where the macros
+ * see complete types. The unused attribute keeps clang happy. */
+static inline void __attribute__((unused)) assert_pkt_id_fields(void)
 {
   /* Packet index must be large enough for the number of packets in a superbuf.
    * We check against the expected value here, and (at runtime) against the
@@ -287,28 +279,6 @@ static bool efct_rx_check_event(const ef_vi* vi)
   return false;
 }
 
-/* state of a partially-completed tx operation */
-struct efct_tx_state
-{
-  /* base address of the aperture */
-  volatile efct_tx_aperture_t* aperture;
-#if ! CI_CFG_CXL
-  /* left over bytes after writing a block */
-  efct_tx_aperture_t tail[EFCT_TX_TAIL_SIZE];
-#endif
-  /* number of left over bytes in 'tail' */
-  unsigned tail_len;
-  /* number of 64-bit words from start of aperture */
-  uint64_t offset;
-  /* mask to keep offset within the aperture range */
-  uint64_t mask;
-#if CI_CFG_CXL
-  /* left over bytes after writing a block - this should be appropriately
-   * aligned to avoid two unaligned loads when using movdir64b */
-  efct_tx_aperture_t tail[EFCT_TX_TAIL_SIZE] EF_VI_ALIGN(EF_VI_DMA_ALIGN);
-#endif
-};
-
 /* generic tx header */
 ci_inline uint64_t efct_tx_header(unsigned packet_length, unsigned ct_thresh,
                                unsigned timestamp_flag, unsigned warm_flag,
@@ -350,148 +320,6 @@ ci_inline bool efct_tx_check(ef_vi* vi, int len)
          (vi->vi_txq.ct_fifo_bytes + EFCT_TX_HEADER_BYTES) / EFCT_TX_ALIGNMENT);
 
   return ef_vi_transmit_space_bytes(vi) >= len;
-}
-
-/* initialise state for a transmit operation */
-ci_inline void efct_tx_init(ef_vi* vi, struct efct_tx_state* tx)
-{
-  unsigned offset = vi->ep_state->txq.ct_added;
-  int i;
-  BUG_ON(offset % EFCT_TX_ALIGNMENT != 0);
-  tx->aperture = (void*) vi->vi_ctpio_mmap_ptr;
-  tx->tail_len = 0;
-  tx->offset = efct_tx_scale_offset_bytes(offset);
-  tx->mask = vi->vi_txq.efct_aperture_mask;
-  for( i = 0; i < EFCT_TX_TAIL_SIZE; i++)
-    tx->tail[i] = 0;
-}
-
-/* store a left-over byte from the start or end of a block */
-ci_inline void efct_tx_tail_byte(struct efct_tx_state* tx, uint8_t byte)
-{
-#if CI_CFG_CXL
-  const int idx = tx->tail_len / sizeof(tx->tail[0]);
-#else
-  const int idx = 0;
-#endif
-  BUG_ON(tx->tail_len >= sizeof(tx->tail));
-  tx->tail[idx] = (tx->tail[idx] << 8) | byte;
-  tx->tail_len++;
-}
-
-/* write a 64-bit word to the CTPIO aperture, dealing with wrapping */
-ci_inline void efct_tx_word(struct efct_tx_state* tx,
-                            const efct_tx_aperture_t* src)
-{
-  tx->aperture[tx->offset++ & tx->mask] = *src;
-}
-
-#if CI_CFG_CXL
-/* write an entire cacheline to the CTPIO aperture */
-ci_inline void efct_tx_cacheline(struct efct_tx_state* tx, const void* src)
-{
-  void* dst = (void*)&tx->aperture[tx->offset & tx->mask];
-  const uint64_t tx_offset_inc =
-    efct_tx_scale_offset_bytes(EF_VI_CACHE_LINE_SIZE);
-  /* The aperture offset increases by the same amount every time, and we must
-   * be certain that we can't end up writing past the end of our aperture. As
-   * such, it must be true that the aperture is divisible by the amount we
-   * increase the offset by for each write with no remainder. */
-  BUG_ON((tx->mask + 1) % tx_offset_inc != 0);
-  BUG_ON(EF_VI_CACHE_LINE_SIZE != 64);
-  movdir64b(dst, src);
-  tx->offset += tx_offset_inc;
-}
-#endif
-
-/* write a chunk to the CTPIO aperture */
-ci_inline void efct_tx_chunk(struct efct_tx_state* tx, const void* src)
-{
-#if ! CI_CFG_CXL
-  efct_tx_word(tx, src);
-#else
-  efct_tx_cacheline(tx, src);
-#endif
-}
-
-/* write the tail to the CTPIO aperture */
-ci_inline void efct_tx_tail(struct efct_tx_state* tx)
-{
-  int i;
-
-  for( i = 0; i < EFCT_TX_TAIL_SIZE; i++ )
-    tx->tail[i] = CI_BSWAP_BE64(tx->tail[i]);
-
-  efct_tx_chunk(tx, tx->tail);
-
-  for( i = 0; i < EFCT_TX_TAIL_SIZE; i++ )
-    tx->tail[i] = 0;
-  tx->tail_len = 0;
-}
-
-/* write a block of bytes to the CTPIO aperture, dealing with wrapping and leftovers */
-ci_inline void efct_tx_block(struct efct_tx_state* __restrict__ tx, char* base, int len)
-{
-  if( tx->tail_len != 0 ) {
-    while( len > 0 && tx->tail_len < EFCT_TX_CHUNK_SIZE ) {
-      efct_tx_tail_byte(tx, *base);
-      base++;
-      len--;
-    }
-
-    if( tx->tail_len == EFCT_TX_CHUNK_SIZE ) {
-      efct_tx_tail(tx);
-    }
-  }
-
-  while( len >= EFCT_TX_CHUNK_SIZE ) {
-    efct_tx_chunk(tx, base);
-    base += EFCT_TX_CHUNK_SIZE;
-    len -= EFCT_TX_CHUNK_SIZE;
-  }
-
-  while( len > 0 ) {
-    efct_tx_tail_byte(tx, *base);
-    base++;
-    len--;
-  }
-}
-
-/* complete a tx operation, writing leftover bytes and padding as needed */
-ci_inline void efct_tx_complete(ef_vi* vi, struct efct_tx_state* tx, uint32_t dma_id, int len)
-{
-  ef_vi_txq* q = &vi->vi_txq;
-  ef_vi_txq_state* qs = &vi->ep_state->txq;
-  struct efct_tx_descriptor* desc = q->descriptors;
-  int i = qs->added & q->mask;
-
-  if( tx->tail_len != 0 ) {
-    const int idx = tx->tail_len / sizeof(tx->tail[0]);
-    const int offset = tx->tail_len % sizeof(tx->tail[0]);
-    tx->tail[idx] <<= (sizeof(tx->tail[0]) - offset) * 8;
-    efct_tx_tail(tx);
-  }
-  while( tx->offset % efct_tx_scale_offset_bytes(EFCT_TX_ALIGNMENT) != 0 )
-    efct_tx_chunk(tx, tx->tail);
-
-  /* Force the write-combined traffic to be flushed to PCIe, to limit the
-   * maximum possible reordering the NIC will see to one packet. Benchmarks
-   * demonstrate that this sfence is well-parallelised by the CPU, so smarter
-   * algorithms trying to avoid it for small packets are unlikely to be
-   * cost-effective */
-#if defined __x86_64__ || defined __i386__
-  /* Our compat tools define ci_wmb() as just a compiler fence on x86, since
-   * that's usually right due to TSO. Not in this case. */
-  ci_x86_sfence();
-#else
-  ci_wmb();
-#endif
-
-  len = CI_ROUND_UP(len + EFCT_TX_HEADER_BYTES, EFCT_TX_ALIGNMENT);
-  desc[i].len = len;
-  q->ids[i] = dma_id;
-  qs->ct_added += len;
-  qs->added += 1;
 }
 
 /* get a tx completion event, or null if no valid event available */
@@ -549,6 +377,7 @@ static void efct_tx_handle_event(ef_vi* vi, ci_qword_t event, ef_event* ev_out,
   if( unlikely(*again) )
     count = EF_VI_TRANSMIT_BATCH;
 
+  ef_vi_return_evq_slots(vi, count);
   while( count-- ) {
     BUG_ON(qs->previous == qs->added);
     qs->ct_removed += desc[qs->previous & q->mask].len;
@@ -612,51 +441,6 @@ static void efct_tx_handle_event(ef_vi* vi, ci_qword_t event, ef_event* ev_out,
   }
 }
 
-static int efct_ef_vi_transmit(ef_vi* vi, ef_addr base, int len,
-                               ef_request_id dma_id)
-{
-  /* TODO need to avoid calling this with CTPIO fallback buffers */
-  struct efct_tx_state tx;
-  uint64_t header;
-
-  if( ! efct_tx_check(vi, len) )
-    return -EAGAIN;
-
-  efct_tx_init(vi, &tx);
-  header = efct_tx_pkt_header(vi, len, EFCT_TX_CT_DISABLE);
-  efct_tx_block(&tx, (void*)&header, sizeof(header));
-  efct_tx_block(&tx, (void*)(uintptr_t)base, len);
-  efct_tx_complete(vi, &tx, dma_id, len);
-
-  return 0;
-}
-
-static int efct_ef_vi_transmitv(ef_vi* vi, const ef_iovec* iov, int iov_len,
-                                ef_request_id dma_id)
-{
-  struct efct_tx_state tx;
-  uint64_t header;
-  int len = 0, i;
-
-  efct_tx_init(vi, &tx);
-
-  for( i = 0; i < iov_len; ++i )
-    len += iov[i].iov_len;
-
-  if( ! efct_tx_check(vi, len) )
-    return -EAGAIN;
-
-  header = efct_tx_pkt_header(vi, len, EFCT_TX_CT_DISABLE);
-  efct_tx_block(&tx, (void*)&header, sizeof(header));
-
-  for( i = 0; i < iov_len; ++i )
-    efct_tx_block(&tx, (void*)(uintptr_t)iov[i].iov_base, iov[i].iov_len);
-
-  efct_tx_complete(vi, &tx, dma_id, len);
-
-  return 0;
-}
-
 static void efct_ef_vi_transmit_push(ef_vi* vi)
 {
 }
@@ -716,68 +500,6 @@ static bool tx_warm_active(ef_vi* vi)
 }
 
 #define EFCT_TX_POSTED_ID 0xefc7efc7
-static void efct_ef_vi_transmitv_ctpio(ef_vi* vi, size_t len,
-                                       const struct iovec* iov, int iovcnt,
-                                       unsigned threshold)
-{
-  struct efct_tx_state tx;
-  unsigned threshold_extra;
-  uint64_t header;
-  int i;
-  uint32_t dma_id;
-
-  /* If we didn't have space then we must report this in _fallback and have
-   * another go */
-  vi->last_ctpio_failed = !efct_tx_check(vi, len);
-  if(unlikely( vi->last_ctpio_failed ))
-    return;
-  efct_tx_init(vi, &tx);
-
-  /* ef_vi interface takes threshold in bytes, but the efct hardware interface
-   * takes multiples of 64 (rounded up), and includes the 8-byte header in the
-   * count. Anything too big to fit in the field is equivalent to disabling
-   * cut-through; test that first to avoid arithmetic overflow.
-   */
-  threshold_extra = EFCT_TX_HEADER_BYTES + EFCT_TX_ALIGNMENT - 1;
-  if( threshold > EFCT_TX_CT_DISABLE * EFCT_TX_ALIGNMENT - threshold_extra )
-    threshold = EFCT_TX_CT_DISABLE;
-  else
-    threshold = (threshold + threshold_extra) / EFCT_TX_ALIGNMENT;
-
-  threshold = CI_MAX((unsigned)vi->vi_txq.ct_thresh_min, threshold);
-  header = efct_tx_pkt_header(vi, len, threshold);
-  efct_tx_block(&tx, (void*)&header, sizeof(header));
-
-  for( i = 0; i < iovcnt; ++i )
-    efct_tx_block(&tx, iov[i].iov_base, iov[i].iov_len);
-
-  /* Use a valid but bogus dma_id rather than invalid EF_REQUEST_ID_MASK to
-   * support tcpdirect, which relies on the correct return value from
-   * ef_vi_transmit_unbundle to free its otherwise unused transmit buffers.
-   *
-   * For compat with existing ef_vi apps which will post a fallback and may
-   * want to use the dma_id we'll replace this value with the real one then.
-   *
-   * For transmit warmup, use an invalid dma_id so that it is ignored.
-   */
-  dma_id = tx_warm_active(vi) ? EF_REQUEST_ID_MASK : EFCT_TX_POSTED_ID;
-  efct_tx_complete(vi, &tx, dma_id, len);
-}
-
-static void efct_ef_vi_transmitv_ctpio_copy(ef_vi* vi, size_t frame_len,
-                                            const struct iovec* iov, int iovcnt,
-                                            unsigned threshold, void* fallback)
-{
-  int i;
-
-  efct_ef_vi_transmitv_ctpio(vi, frame_len, iov, iovcnt, threshold);
-
-  /* This could be made more efficient, if anyone cares enough */
-  for( i = 0; i < iovcnt; ++i ) {
-    memcpy(fallback, iov[i].iov_base, iov[i].iov_len);
-    fallback = (char*)fallback + iov[i].iov_len;
-  }
-}
 
 static inline int efct_ef_vi_ctpio_fallback(ef_vi* vi, ef_request_id dma_id)
 {
@@ -795,31 +517,6 @@ static inline int efct_ef_vi_ctpio_fallback(ef_vi* vi, ef_request_id dma_id)
     EF_VI_BUG_ON(q->ids[di] != EF_REQUEST_ID_MASK);
   }
   return 0;
-}
-
-static int efct_ef_vi_transmit_ctpio_fallback(ef_vi* vi, ef_addr dma_addr,
-                                              size_t len, ef_request_id dma_id)
-{
-  if(unlikely( vi->last_ctpio_failed )) {
-    int rc = efct_ef_vi_transmit(vi, dma_addr, len, dma_id);
-    vi->last_ctpio_failed = rc == -EAGAIN;
-    return rc;
-  }
-  return efct_ef_vi_ctpio_fallback(vi, dma_id);
-}
-
-
-static int efct_ef_vi_transmitv_ctpio_fallback(ef_vi* vi,
-                                               const ef_iovec* dma_iov,
-                                               int dma_iov_len,
-                                               ef_request_id dma_id)
-{
-  if(unlikely( vi->last_ctpio_failed )) {
-    int rc = efct_ef_vi_transmitv(vi, dma_iov, dma_iov_len, dma_id);
-    vi->last_ctpio_failed = rc == -EAGAIN;
-    return rc;
-  }
-  return efct_ef_vi_ctpio_fallback(vi, dma_id);
 }
 
 static int efct_ef_vi_transmit_alt_select(ef_vi* vi, unsigned alt_id)
@@ -878,44 +575,16 @@ static void efct_ef_vi_receive_push(ef_vi* vi)
 
 static int rx_rollover(ef_vi* vi, int qix)
 {
-  const uint64_t pkts_per_superbuf = EFCT_RX_SUPERBUF_BYTES / EFCT_PKT_STRIDE;
   uint32_t meta_pkt;
   ef_vi_efct_rxq_ptr* rxq_ptr = &vi->ep_state->rxq.rxq_ptr[qix];
-  ef_vi_efct_rxq_state* rxq_efct_state = &vi->ep_state->rxq.efct_state[qix];
-  ef_vi_rxq_state* rxq_state = &vi->ep_state->rxq;
   unsigned sbseq;
   bool sentinel;
   struct efct_rx_descriptor* desc;
   int rc;
 
-  /* Make sure rxq_state->n_evq_rx_pkts has enough space to store the maximum
-   * number of packets we allow an efct application to have */
-  EF_VI_BUILD_ASSERT(
-    /* Max number of packets stored in n_evq_rx_pkts */
-    (((1ull << ((8 * sizeof(rxq_state->n_evq_rx_pkts)) - 1)) << 1) | 1)
-    >=
-    /* Max number of packets possible = max rxqs * max pkts per rxq */
-    ((uint64_t)EF_VI_MAX_EFCT_RXQS * CI_EFCT_MAX_SUPERBUFS *
-     (EFCT_RX_SUPERBUF_BYTES / EFCT_PKT_STRIDE) /* pkts_per_superbuf */)
-  );
-
-  /* If this RXQ generates events, then we must make sure our EVQ has space to
-   * handle enough events for this superbuf. */
-  if( rxq_efct_state->generates_events &&
-      rxq_state->n_evq_rx_pkts < pkts_per_superbuf ) {
-    EFCT_RXQ_STAT_INC(vi, qix, rollover_failed_no_evq_space);
-    return -EAGAIN;
-  }
-
   rc = vi->efct_rxqs.ops->next(vi, qix, &sentinel, &sbseq);
   if( rc < 0 )
     return rc;
-
-  /* Consume the packets required by the superbuf we just posted. It's worth
-   * noting that this isn't susceptible to a TOCTTOU race condition because
-   * onload will never call ef_eventq_poll on the same VI concurrently.*/
-  rxq_state->n_evq_rx_pkts -= (int)rxq_efct_state->generates_events *
-                              pkts_per_superbuf;
 
   meta_pkt = make_pkt_id(qix, rc, 0);
 
@@ -950,7 +619,12 @@ static int rx_rollover(ef_vi* vi, int qix)
   /* Preload the superbuf's refcount with all the (potential) packets in
    * it - more efficient than incrementing for each rx individually */
   EF_VI_ASSERT(rxq_ptr->superbuf_pkts > 0);
-  EF_VI_ASSERT(rxq_ptr->superbuf_pkts < (1 << PKT_ID_PKT_BITS));
+  /* rxq_ptr->superbuf_pkts is a uint16_t, which makes any "< (1 << 16)"
+   * check tautological (clang -Wtautological-constant-out-of-range-compare).
+   * The PKT_ID_PKT_BITS == 16 invariant is asserted at build time, see
+   * EF_VI_BUILD_ASSERT() in efct_design_params_check() above. If the
+   * field is ever widened to uint32_t (matching ef_vi_efct_rxq_state),
+   * reinstate the runtime bound check here. */
   desc = efct_rx_desc(vi, meta_pkt);
   desc->refcnt = rxq_ptr->superbuf_pkts;
   desc->superbuf_pkts = rxq_ptr->superbuf_pkts;
@@ -1065,6 +739,7 @@ static inline int efct_poll_rx(ef_vi* vi, int ix, ef_event* evs, int evs_len)
         ef_vi_efct_rxq_state* rxq_efct_state =
           &vi->ep_state->rxq.efct_state[ix];
         int nskipped;
+        int freed_evq_slots;
         if( next_sb == prev_sb ) {
           /* We created the desc->refcnt assuming that this superbuf would be
            * full of packets. It wasn't, so consume all the unused refs */
@@ -1090,8 +765,15 @@ static inline int efct_poll_rx(ef_vi* vi, int ix, ef_event* evs, int evs_len)
         /* Uncount partially counted RX events, as if we end up seeing a
          * rollover during RX event processing, we can't quickly work
          * out nskipped so just increment by the entire superbuf. */
-        qs->n_evq_rx_pkts -= (int)rxq_efct_state->generates_events *
-                             (rxq_ptr->superbuf_pkts - nskipped);
+        freed_evq_slots = (int)rxq_efct_state->generates_events *
+                          (rxq_ptr->superbuf_pkts - nskipped);
+        /* It is theoretically possible that we have a smaller EVQ than the
+         * number of TX/RX events we could generate. In which case, we might
+         * have counted some of these RX events in the superbuf here and these
+         * might have been used to send more TX packets or post more RX bufs.
+         * In which case, this can cause the available slots to become negative
+         * until we handle the rollover event in our EVQ. */
+        ef_vi_consume_evq_slots_unchecked(vi, freed_evq_slots);
 
         EF_VI_ASSERT(nskipped <= desc->refcnt);
         desc->refcnt -= nskipped;
@@ -1150,6 +832,10 @@ static void efct_tx_handle_error_event(ef_vi* vi, ci_qword_t event,
   /* Pretend our TXQ is full so all transmits until this queue is reinitialised
    * fail and are reported to the caller immediately. */
   qs->ct_added = qs->ct_removed + txq_vi->vi_txq.ct_fifo_bytes;
+
+  /* A TX error event corresponds to a single transmit, for which we would have
+   * taken a credit, so lets give it back. */
+  ef_vi_return_evq_slots(vi, 1);
 
   /* If we get an error event then all that we'll get subsequently for this
    * TXQ is a flush, as the queue will be torn down. That means there's no
@@ -1213,16 +899,16 @@ static void efct_evq_handle_rx_ev(ef_vi* vi, ci_qword_t event)
    * rollover events also set the number of packets in the event to 1, so we
    * reduce this value by 1 here to compensate. */
   const uint64_t rollover_pkts = EFCT_RX_SUPERBUF_BYTES / EFCT_PKT_STRIDE - 1;
-  ef_vi_rxq_state* rxq_state = &vi->ep_state->rxq;
+  int rollover = CI_QWORD_FIELD(event, EFCT_RX_EVENT_ROLLOVER);
+  int num_pkts = CI_QWORD_FIELD(event, EFCT_RX_EVENT_NUM_PACKETS);
+  int evq_slots = rollover * rollover_pkts + num_pkts;
 
   /* If the hardware rolls over, then just consume an entire superbuf. We don't
    * have access (quickly) to the queue index here, otherwise we could more
    * finely count the packets per RXQ. Instead we depend upon the RX polling to
    * spot a rollover, and reduce any partially counted packets we may have
    * encountered (or will in the future). */
-  rxq_state->n_evq_rx_pkts +=
-    CI_QWORD_FIELD(event, EFCT_RX_EVENT_ROLLOVER) * rollover_pkts +
-    CI_QWORD_FIELD(event, EFCT_RX_EVENT_NUM_PACKETS);
+  ef_vi_return_evq_slots(vi, evq_slots);
 }
 
 int efct_poll_tx(ef_vi* vi, ef_event* evs, int evs_len)
@@ -1375,7 +1061,10 @@ void efct_vi_start_rxq(ef_vi* vi, int ix, int qid)
   efct_get_rxq_state(vi, ix)->qid = qid;
   rxq->config_generation = 0;
   rxq_ptr->superbuf_pkts = *rxq->live.superbuf_pkts;
-  rxq_ptr->meta_pkt = rxq_ptr->superbuf_pkts + 1;
+  /* Set meta_pkt to trigger rollover on first poll. Encode sbseq as -1 so
+   * that the wakeup params calculation ((sbseq >> 32) + 1) gives sbseq 0,
+   * allowing correct priming before the first poll has occurred. */
+  rxq_ptr->meta_pkt = ((uint64_t)-1 << 32) | (rxq_ptr->superbuf_pkts + 1);
   rxq_ptr->meta_offset = vi->efct_rxqs.meta_offset;
 
   EF_VI_ASSERT(rxq_ptr->superbuf_pkts > 0);
@@ -1520,11 +1209,12 @@ efct_design_parameters(struct ef_vi* vi, struct efab_nic_design_parameters* dp)
   return 0;
 }
 
-static int efct_pre_filter_add(struct ef_vi* vi, bool shared_mode)
+static int efct_pre_filter_add(struct ef_vi* vi, bool shared_mode,
+                               bool wants_interrupts)
 {
   int rc = 0;
   if( vi->efct_rxqs.ops->pre_attach )
-    rc = vi->efct_rxqs.ops->pre_attach(vi, shared_mode);
+    rc = vi->efct_rxqs.ops->pre_attach(vi, shared_mode, wants_interrupts);
 
   return rc;
 }
@@ -1540,6 +1230,7 @@ static int efct_post_filter_add(struct ef_vi* vi,
 #else
   int rc;
   unsigned n_superbufs;
+  bool request_wakeups;
 
    /* Block filters don't attach to an RXQ */
   if( ef_vi_filter_is_block_only(cookie) )
@@ -1548,11 +1239,9 @@ static int efct_post_filter_add(struct ef_vi* vi,
   EF_VI_ASSERT(rxq >= 0);
   n_superbufs = CI_ROUND_UP((vi->vi_rxq.mask + 1) * EFCT_PKT_STRIDE,
                             EFCT_RX_SUPERBUF_BYTES) / EFCT_RX_SUPERBUF_BYTES;
-  /* TODO currently we don't have support for requesting interrupts from ef_vi
-   * clients. When we wire that in, it will be fed through here. Note that in the
-   * efct_kbufs case interrupts are always enabled anyway. */
+  request_wakeups = (fs->flags & EF_FILTER_FLAG_REQUEST_WAKEUPS) != 0;
   rc = vi->efct_rxqs.ops->attach(vi, rxq, -1, n_superbufs, shared_mode,
-                                 false, &rxq);
+                                 request_wakeups, &rxq);
   if( rc == -EALREADY )
     rc = 0;
   return rc;
@@ -1811,7 +1500,7 @@ int efct_vi_get_pkt_wakeup_params(ef_vi* vi, int qix, unsigned* sbseq,
 int efct_vi_prime(ef_vi* vi, ef_driver_handle dh)
 {
   ci_resource_prime_qs_op_t  op;
-  int i;
+  int i, n_rxqs;
 
   /* The loop below assumes that all rxqs will fit in the fixed array in
    * the operations's arguments. If that assumption no longer holds, then
@@ -1820,17 +1509,19 @@ int efct_vi_prime(ef_vi* vi, ef_driver_handle dh)
   EF_VI_BUILD_ASSERT(CI_ARRAY_SIZE(op.rxq_current) >= EF_VI_MAX_EFCT_RXQS);
 
   op.crp_id = efch_make_resource_id(vi->vi_resource_id);
+  n_rxqs = 0;
   for( i = 0; i < vi->efct_rxqs.max_qs; ++i ) {
-    op.rxq_current[i].rxq_id =
+    op.rxq_current[n_rxqs].rxq_id =
       vi->efct_rxqs.ops->get_rxq_resource_id(vi, i);
-    if( efch_resource_id_is_none(op.rxq_current[i].rxq_id) )
-      break;
+    if( efch_resource_id_is_none(op.rxq_current[n_rxqs].rxq_id) )
+      continue;
     if( vi->efct_rxqs.ops->get_wakeup_params(vi, i,
-                                             &op.rxq_current[i].sbseq,
-                                             &op.rxq_current[i].pktix) < 0 )
-      break;
+                                             &op.rxq_current[n_rxqs].sbseq,
+                                             &op.rxq_current[n_rxqs].pktix) < 0 )
+      continue;
+    n_rxqs++;
   }
-  op.n_rxqs = i;
+  op.n_rxqs = n_rxqs;
   op.n_txqs = vi->vi_txq.mask != 0 ? 1 : 0;
 
   /* If we have no queues, we have nothing to wait for and will never wake */
@@ -1929,11 +1620,53 @@ void efct_superbufs_cleanup(ef_vi* vi)
 #endif
 }
 
+/* Produce definitions for EFCT transmit functions which write 8-bytes at a
+ * time to the CTPIO aperture. */
+ci_inline __attribute__((always_inline)) void
+efct_tx_write_8(volatile void* dst, const void* src)
+{
+  *(volatile efct_tx_aperture_t*)dst = *(const efct_tx_aperture_t*)src;
+}
+
+#define EFCT_TX_CHUNK_SIZE 8
+#include "efct_tx.h.tmpl"
+
+#if CI_CFG_CXL
+/* Userspace requires the movdir64b target as we use the intrinsic, whereas the
+ * kernel wrapper directly uses assembly so doesn't need to specify this target
+ * to ensure things are inlined appropriately. */
+#ifndef __KERNEL__
+#define EFCT_TX_FUNCTION_ATTRS __attribute__((target("movdir64b")))
+#else
+#define EFCT_TX_FUNCTION_ATTRS
+#endif
+
+/* Produce definitions for EFCT transmit functions which write 64-bytes at a
+ * time to the CTPIO aperture. */
+ci_inline EFCT_TX_FUNCTION_ATTRS __attribute__((always_inline)) void
+efct_tx_write_64(volatile void* dst, const void* src)
+{
+  /* This instruction does not accept a volatile pointer, but we get the same
+   * guarantees we would writing to a volatile address:
+   * - The compiler won't optimise the write away (because we don't read from
+   *   the destination at any point) because movdir64b is explicitly a store
+   *   instruction, so optimising it away would be a compiler bug.
+   * - The compiler won't reorder writes to the destination (i.e., other calls
+   *   to movdir64b in this case) as it can't reason about what the destination
+   *   is, in particular, that it isn't some other memory in this area.
+   *
+   * Notably, the kernel implementation also provides the same effect because
+   * the implementation uses `asm volatile` and explicitly indicates the effect
+   * on memory. */
+  movdir64b((void*)dst, src);
+}
+
+#define EFCT_TX_CHUNK_SIZE 64
+#include "efct_tx.h.tmpl"
+#endif
+
 static void efct_vi_initialise_ops(ef_vi* vi)
 {
-  vi->ops.transmit               = efct_ef_vi_transmit;
-  vi->ops.transmitv              = efct_ef_vi_transmitv;
-  vi->ops.transmitv_init         = efct_ef_vi_transmitv;
   vi->ops.transmit_push          = efct_ef_vi_transmit_push;
   vi->ops.transmit_pio           = efct_ef_vi_transmit_pio;
   vi->ops.transmit_copy_pio      = efct_ef_vi_transmit_copy_pio;
@@ -1941,8 +1674,6 @@ static void efct_vi_initialise_ops(ef_vi* vi)
   vi->ops.stop_transmit_warm     = efct_ef_vi_stop_transmit_warm;
   vi->ops.transmit_pio_warm      = efct_ef_vi_transmit_pio_warm;
   vi->ops.transmit_copy_pio_warm = efct_ef_vi_transmit_copy_pio_warm;
-  vi->ops.transmitv_ctpio        = efct_ef_vi_transmitv_ctpio;
-  vi->ops.transmitv_ctpio_copy   = efct_ef_vi_transmitv_ctpio_copy;
   vi->ops.transmit_alt_select    = efct_ef_vi_transmit_alt_select;
   vi->ops.transmit_alt_select_default = efct_ef_vi_transmit_alt_select_default;
   vi->ops.transmit_alt_stop      = efct_ef_vi_transmit_alt_stop;
@@ -1960,14 +1691,21 @@ static void efct_vi_initialise_ops(ef_vi* vi)
   vi->ops.eventq_timer_zero      = efct_ef_eventq_timer_zero;
   vi->ops.eventq_has_many_events = efct_ef_eventq_has_many_events;
   vi->ops.eventq_has_event       = efct_ef_eventq_has_event;
-  vi->ops.transmit_ctpio_fallback = efct_ef_vi_transmit_ctpio_fallback;
-  vi->ops.transmitv_ctpio_fallback = efct_ef_vi_transmitv_ctpio_fallback;
   vi->internal_ops.design_parameters = efct_design_parameters;
   vi->internal_ops.pre_filter_add = efct_pre_filter_add;
   vi->internal_ops.post_filter_add = efct_post_filter_add;
   vi->ops.eventq_poll = efct_ef_eventq_poll;
   vi->ops.receive_poll = efct_ef_receive_poll;
   vi->ops.receive_get_filter_id = efct_ef_vi_receive_get_filter_id;
+  vi->ops.future_eventq_poll = efct_vi_rx_future_poll;
+
+#if CI_CFG_CXL
+  efct_vi_set_tx_ops_64(vi);
+  (void)efct_vi_set_tx_ops_8;
+#else
+  efct_vi_set_tx_ops_8(vi);
+#endif
+
 }
 
 int efct_vi_init(ef_vi* vi)
@@ -2003,4 +1741,3 @@ int efct_vi_init(ef_vi* vi)
 
   return 0;
 }
-

@@ -273,7 +273,8 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
 void ci_tcp_timeout_kalive(ci_netif* netif, ci_tcp_state* ts)
 {
   ci_iptime_t t_last_recv = 
-    CI_MAX(ts->t_last_recv_payload, ts->t_last_recv_ack);
+    TIME_GT(ts->t_last_recv_payload, ts->t_last_recv_ack)
+            ? ts->t_last_recv_payload : ts->t_last_recv_ack;
 
   ci_assert(netif);
   ci_assert(ts);

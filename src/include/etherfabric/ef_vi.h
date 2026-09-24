@@ -795,11 +795,6 @@ typedef struct {
   uint64_t efct_active_qs;                         /* efct only */
   ef_vi_efct_rxq_ptr rxq_ptr[EF_VI_MAX_EFCT_RXQS]; /* efct only */
   ef_vi_efct_rxq_state efct_state[EF_VI_MAX_EFCT_RXQS]; /* efct only */
-
-  /** Number of RX packet slots available in an EVQ. Used to limit reposting of
-   * superbufs which may otherwise cause an EVQ overflow. We only care about
-   * the value here when efct_state[i].generates_events. */
-  int32_t n_evq_rx_pkts; /* efct only */
 } ef_vi_rxq_state;
 
 /*! \brief State of event queue
@@ -823,6 +818,8 @@ typedef struct {
   uint32_t      unsol_credit_seq;
   /** Time synchronization flags */
   uint32_t      sync_flags;
+  /** Lower bound on the number of unused EVQ slots */
+  int32_t       min_unused_evq_slots;
 } ef_eventq_state;
 
 /*! \brief TX descriptor ring
@@ -907,7 +904,7 @@ typedef struct {
   /** Post a buffer to the hardware FIFO (called internally) */
   void (*post)(struct ef_vi*, int ix, int sbid, bool sentinel);
   /** To be called before inserting a filter. */
-  int (*pre_attach)(struct ef_vi*, bool shared_mode);
+  int (*pre_attach)(struct ef_vi*, bool shared_mode, bool wants_interrupts);
   /** Attach a queue, allocating a new one if (qid_in < 0) */
   int  (*attach)(struct ef_vi*,
                  int qid_in,
@@ -1188,6 +1185,10 @@ typedef struct ef_vi {
   char*                         evq_base;
   /** Mask for offsets within the event queue for the virtual interface */
   unsigned                      evq_mask;
+  /** The maximum number of events that a user of this VI can generate,
+  ** this will be the capacity subtract any reservation such as for
+  ** time sync events. */
+  unsigned                      evq_max_events;
   /** True if the event queue uses phase bits */
   int                           evq_phase_bits;
   /** The timer quantum for the virtual interface, in nanoseconds */
@@ -1210,6 +1211,8 @@ typedef struct ef_vi {
   /** Statistics for the virtual interface */
   ef_vi_stats*                  vi_stats;
 
+  /** The EVQ this VI was created with */
+  struct ef_vi*                 evq_vi;
   /** Virtual queues for the virtual interface */
   struct ef_vi*                 vi_qs[EF_VI_MAX_QS];
   /** Number of virtual queues for the virtual interface */
@@ -1329,6 +1332,8 @@ typedef struct ef_vi {
     int32_t (*receive_get_filter_id)(struct ef_vi* vi,
                                      const ef_event* rx_event,
                                      const void* rx_packet);
+    /** Poll an event queue to pick up a peeked future event */
+    int (*future_eventq_poll)(struct ef_vi*, ef_event*, int evs_len);
   } ops;  /**< Driver-dependent operations. */
   /* Doxygen comment above is documentation for the ops member of ef_vi */
 
@@ -1339,7 +1344,7 @@ typedef struct ef_vi {
     /** Configure based on hardware design parameters */
     int (*design_parameters)(struct ef_vi*, struct efab_nic_design_parameters*);
     /** A filter is about to be added to the given VI */
-    int (*pre_filter_add)(struct ef_vi*, bool shared_mode);
+    int (*pre_filter_add)(struct ef_vi*, bool shared_mode, bool wants_interrupts);
     /** A filter has just been added to the given VI */
     int (*post_filter_add)(struct ef_vi*, const struct ef_filter_spec* fs,
                            const struct ef_filter_cookie* cookie, int rxq,
@@ -1999,7 +2004,8 @@ ef_vi_inline int ef_vi_transmit_fill_level(const ef_vi* vi)
 ef_vi_inline int ef_vi_transmit_space_bytes(const ef_vi* vi)
 {
   ef_vi_txq_state* qs = &vi->ep_state->txq;
-  return vi->vi_txq.ct_fifo_bytes - (qs->ct_added - qs->ct_removed);
+  return vi->evq_vi->ep_state->evq.min_unused_evq_slots > 0 ?
+         vi->vi_txq.ct_fifo_bytes - (qs->ct_added - qs->ct_removed) : 0;
 }
 
 

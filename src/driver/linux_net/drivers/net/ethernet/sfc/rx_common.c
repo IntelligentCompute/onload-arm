@@ -179,8 +179,8 @@ static void efx_init_rx_recycle_ring(struct efx_rx_queue *rx_queue)
 
 	page_ring_size = roundup_pow_of_two(bufs_in_recycle_ring /
 					    efx->rx_bufs_per_page);
-	rx_queue->page_ring = kcalloc(page_ring_size,
-				      sizeof(*rx_queue->page_ring), GFP_KERNEL);
+	rx_queue->page_ring = kzalloc_objs(*rx_queue->page_ring,
+					   page_ring_size);
 	if (!rx_queue->page_ring)
 		rx_queue->page_ptr_mask = 0;
 	else
@@ -218,6 +218,26 @@ void efx_discard_rx_packet(struct efx_channel *channel,
 			   unsigned int n_frags)
 {
 	struct efx_rx_queue *rx_queue = efx_channel_get_rx_queue(channel);
+
+	/* When discarding with page sharing enabled, drop the extra reference
+	 * for pages whose last buffer is being freed, unless the page is in
+	 * the recycle ring.
+	 */
+	if (rx_queue->efx->rx_buf_page_share) {
+		struct efx_rx_buffer *buf;
+		unsigned int i;
+
+		for (i = 0, buf = rx_buf;
+		     i < n_frags;
+		     i++, buf = efx_rx_buf_next(rx_queue, buf)) {
+			if (buf->page &&
+			    !(buf->flags & EFX_RX_PAGE_IN_RECYCLE_RING) &&
+			    (buf->flags & EFX_RX_BUF_LAST_IN_PAGE)) {
+				efx_unmap_rx_buffer(rx_queue->efx, buf);
+				put_page(buf->page);
+			}
+		}
+	}
 
 	efx_free_rx_buffers(rx_queue, rx_buf, n_frags);
 }
@@ -305,8 +325,7 @@ int efx_probe_rx_queue(struct efx_rx_queue *rx_queue)
 		  efx_rx_queue_index(rx_queue), entries, rx_queue->ptr_mask);
 
 	/* Allocate RX buffers */
-	rx_queue->buffer = kcalloc(entries, sizeof(*rx_queue->buffer),
-				   GFP_KERNEL);
+	rx_queue->buffer = kzalloc_objs(*rx_queue->buffer, entries);
 	if (!rx_queue->buffer)
 		return -ENOMEM;
 
@@ -1092,74 +1111,138 @@ efx_rx_packet_gro(struct efx_rx_queue *rx_queue, struct efx_rx_buffer *rx_buf,
 
 #endif /* EFX_USE_GRO */
 
-/* RSS contexts.  We're using linked lists and crappy O(n) algorithms, because
- * (a) this is an infrequent control-plane operation and (b) n is small (max 64)
- */
-struct efx_rss_context *efx_alloc_rss_context_entry(struct efx_nic *efx)
+/* RSS contexts */
+struct ethtool_rxfh_context *efx_rxfh_ctx_alloc(u32 indir_size, u32 key_size)
 {
-	struct list_head *head = &efx->rss_context.list;
-	struct efx_rss_context *ctx, *new;
-	u32 id = 1; /* Don't use zero, that refers to the master RSS context */
+	size_t priv_size = sizeof(struct efx_rss_context_priv);
+	size_t indir_bytes, flex_len, key_off, size;
+	struct ethtool_rxfh_context *ctx;
+	u32 priv_bytes;
 
-	WARN_ON(!mutex_is_locked(&efx->rss_lock));
+	priv_bytes = ALIGN(priv_size, sizeof(u32));
+	indir_bytes = array_size(indir_size, sizeof(u32));
 
-	/* Search for first gap in the numbering */
-	list_for_each_entry(ctx, head, list) {
-		if (ctx->user_id != id)
-			break;
-		id++;
-		/* Check for wrap.  If this happens, we have nearly 2^32
-		 * allocated RSS contexts, which seems unlikely.
-		 */
-		if (WARN_ON_ONCE(!id))
-			return NULL;
-	}
+	key_off = size_add(priv_bytes, indir_bytes);
+	flex_len = size_add(key_off, key_size);
+	size = struct_size_t(struct ethtool_rxfh_context, data, flex_len);
+
+	ctx = kzalloc(size, GFP_KERNEL_ACCOUNT);
+	if (!ctx)
+		return NULL;
+
+	ctx->indir_size = indir_size;
+	ctx->key_size = key_size;
+	ctx->key_off = key_off;
+	ctx->priv_size = priv_size;
+
+	return ctx;
+}
+#if defined(EFX_NOT_UPSTREAM) || (defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT))
+struct ethtool_rxfh_context *efx_alloc_rss_context_entry(struct efx_nic *efx,
+#ifdef EFX_NOT_UPSTREAM
+							 bool onload,
+#endif
+							 u32 *user_id)
+{
+	struct efx_rss_context_priv *priv;
+	struct ethtool_rxfh_context *ctx;
+	struct xa_limit limit;
+	int rc;
+
+	WARN_ON(!efx_rss_is_locked(efx));
 
 	/* Create the new entry */
-	new = kzalloc(sizeof(struct efx_rss_context), GFP_KERNEL);
-	if (!new)
+	ctx = efx_rxfh_ctx_alloc(EFX_RX_INDIR_LEN, EFX_RX_KEY_LEN);
+	if (!ctx)
 		return NULL;
-	new->context_id = EFX_MCDI_RSS_CONTEXT_INVALID;
-	new->flags = RSS_CONTEXT_FLAGS_DEFAULT;
+	priv = ethtool_rxfh_context_priv(ctx);
+	priv->context_id = EFX_MCDI_RSS_CONTEXT_INVALID;
+	priv->flags = RSS_CONTEXT_FLAGS_DEFAULT;
 #ifdef EFX_NOT_UPSTREAM
-	new->num_queues = 0;
+	priv->num_queues = 0;
+#endif
+	/* Insert the new entry into the XArray */
+#ifdef EFX_NOT_UPSTREAM
+	if (onload)
+		limit = XA_LIMIT(EFX_ONLOAD_RSS_CONTEXT_OFFSET, U32_MAX);
+	else
+		limit = XA_LIMIT(1, EFX_ONLOAD_RSS_CONTEXT_OFFSET - 1);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT)
+	/* ethtool create/modify/delete API does not give us the user_id,
+	 * only the ctx, so we have to record a flag in priv so that we can
+	 * detect whether this ctx is >= EFX_ONLOAD_RSS_CONTEXT_OFFSET and
+	 * if so refuse to act on it through ethtool
+	 */
+	priv->onload = onload;
+#endif
+#else
+	limit = XA_LIMIT(1, U32_MAX);
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT)
+	rc = xa_alloc(&efx->net_dev->ethtool->rss_ctx, user_id, ctx, limit,
+		      GFP_KERNEL_ACCOUNT);
+#else
+	rc = xa_alloc(&efx->rss_contexts, user_id, ctx, limit,
+		      GFP_KERNEL_ACCOUNT);
+#endif
+	if (rc < 0) {
+		kfree(ctx);
+		return ERR_PTR(-rc);
+	}
+	return ctx;
+}
 #endif
 
-	/* Insert the new entry into the gap */
-	new->user_id = id;
-	list_add_tail(&new->list, &ctx->list);
-	return new;
+struct ethtool_rxfh_context *efx_find_rss_context_entry(struct efx_nic *efx,
+							u32 id)
+{
+	WARN_ON(!efx_rss_is_locked(efx));
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT)
+	return xa_load(&efx->net_dev->ethtool->rss_ctx, id);
+#else
+	return xa_load(&efx->rss_contexts, id);
+#endif
 }
 
-struct efx_rss_context *efx_find_rss_context_entry(struct efx_nic *efx, u32 id)
+#if defined(EFX_NOT_UPSTREAM) || (defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT))
+void efx_free_rss_context_entry(struct efx_nic *efx, u32 id)
 {
-	struct list_head *head = &efx->rss_context.list;
-	struct efx_rss_context *ctx;
+	struct ethtool_rxfh_context *ctx;
 
-	WARN_ON(!mutex_is_locked(&efx->rss_lock));
-
-	list_for_each_entry(ctx, head, list)
-		if (ctx->user_id == id)
-			return ctx;
-	return NULL;
-}
-
-void efx_free_rss_context_entry(struct efx_rss_context *ctx)
-{
-	list_del(&ctx->list);
+	WARN_ON(!efx_rss_is_locked(efx));
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT)
+	ctx = xa_erase(&efx->net_dev->ethtool->rss_ctx, id);
+#else
+	ctx = xa_erase(&efx->rss_contexts, id);
+#endif
+	if (!ctx)
+		return;
 	kfree(ctx);
 }
 
-void efx_set_default_rx_indir_table(struct efx_rss_context *ctx, u32 spread)
+/* Update the indir and key stored in a ctx.  Under the new context API,
+ * the kernel does this for us, but we still need it for Onload contexts.
+ */
+void efx_update_rss_context_entry(struct ethtool_rxfh_context *ctx,
+				  const u32 *indir, const u8 *key)
 {
+	memcpy(ethtool_rxfh_context_indir(ctx), indir,
+	       array_size(ctx->indir_size, sizeof(u32)));
+	memcpy(ethtool_rxfh_context_key(ctx), key, ctx->key_size);
+}
+#endif
+
+void efx_set_default_rx_indir_table(struct ethtool_rxfh_context *ctx, u32 spread)
+{
+	u32 *indir = ethtool_rxfh_context_indir(ctx);
 	size_t i;
 
 	if (spread <= 1)
 		return;
 
-	for (i = 0; i < ARRAY_SIZE(ctx->rx_indir_table); i++)
-		ctx->rx_indir_table[i] =
-			ethtool_rxfh_indir_default(i, spread);
+	for (i = 0; i < ctx->indir_size; i++)
+		indir[i] = ethtool_rxfh_indir_default(i, spread);
 }
 
 /**
@@ -1292,7 +1375,7 @@ struct efx_arfs_rule *efx_rps_hash_add(struct efx_nic *efx,
 			return rule;
 		}
 	}
-	rule = kmalloc(sizeof(*rule), GFP_ATOMIC);
+	rule = kmalloc_obj(*rule, GFP_ATOMIC);
 	*new = true;
 	if (rule) {
 		memcpy(&rule->spec, spec, sizeof(rule->spec));
@@ -1409,7 +1492,7 @@ int efx_filter_ntuple_insert(struct efx_nic *efx, struct efx_filter_spec *spec)
 		return -ENOSPC;
 
 	/* Create the new entry */
-	new = kmalloc(sizeof(*new), GFP_KERNEL);
+	new = kmalloc_obj(*new);
 	if (!new)
 		return -ENOMEM;
 
@@ -1505,9 +1588,8 @@ int efx_init_filters(struct efx_nic *efx)
 
 		efx_for_each_channel(channel, efx) {
 			channel->rps_flow_id =
-				kcalloc(efx->type->max_rx_ip_filters,
-					sizeof(*channel->rps_flow_id),
-					GFP_KERNEL);
+				kzalloc_objs(*channel->rps_flow_id,
+					     efx->type->max_rx_ip_filters);
 			if (!channel->rps_flow_id)
 				success = 0;
 			else

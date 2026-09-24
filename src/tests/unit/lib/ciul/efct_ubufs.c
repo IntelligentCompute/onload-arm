@@ -207,6 +207,7 @@ static ef_vi* alloc_vi(void)
     ef_vi_efct_rxq_state* qs = &state->rxq.efct_state[i];
     qs->free_head = qs->fifo_tail_hw = qs->fifo_tail_sw = qs->fifo_head = -1;
   }
+  vi->evq_vi = vi;
   CHECK(efct_ubufs_init(vi, NULL, 0), ==, 0);
   STATE_STASH(vi);
   STATE_STASH(state);

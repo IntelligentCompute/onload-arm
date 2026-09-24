@@ -598,7 +598,8 @@ ef10_nic_tweak_hardware(struct efhw_nic *nic)
   nic->flags |= NIC_FLAG_HW_MULTICAST_REPLICATION |
                 NIC_FLAG_PHYS_MODE | NIC_FLAG_BUFFER_MODE | NIC_FLAG_VPORTS |
                 NIC_FLAG_RX_MCAST_REPLICATION | NIC_FLAG_USERSPACE_PRIME |
-                NIC_FLAG_SHARED_PD | NIC_FLAG_EXCL_RXQ_ATTACH_IS_DEFAULT;
+                NIC_FLAG_SHARED_PD | NIC_FLAG_EXCL_RXQ_ATTACH_IS_DEFAULT |
+                NIC_FLAG_RX_RSS;
 
   /* Determine what the filtering capabilies are */
   ef10_nic_check_supported_filters(nic);
@@ -1700,8 +1701,10 @@ ef10_dmaq_rx_q_init(struct efhw_nic *nic, struct efhw_dmaq_params *params)
 
   /* Always set TPH steering even if flag_enable_tph == 0 to clear
    * previous state. */
-  if( rc == 0 )
-    efhw_set_tph_steering(nic, params->evq, flag_enable_tph, flag_tph_tag_mode);
+  if( rc == 0 ) {
+    uint16_t tag_used;
+    efhw_set_tph_steering(nic, params->evq, flag_enable_tph, flag_tph_tag_mode, &tag_used);
+  }
 
   if( rc == 0 )
     params->qid_out = params->dmaq;

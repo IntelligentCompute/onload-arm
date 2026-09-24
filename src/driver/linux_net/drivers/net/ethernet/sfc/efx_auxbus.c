@@ -16,6 +16,7 @@
 #include "rx_common.h"
 #include "efx_auxbus_internal.h"
 #include "mcdi_functions.h"
+#include "efx_cxl.h"
 
 /* Numbers for auxiliary bus devices need to be unique in the host. */
 static DEFINE_IDA(efx_auxbus_ida);
@@ -300,7 +301,8 @@ static int efx_auxbus_fw_rpc(struct efx_auxdev_client *cdev,
 static int efx_auxbus_remove_rxfh_context(struct efx_auxdev_client *cdev,
 					  struct ethtool_rxfh_param *rxfh)
 {
-	struct efx_rss_context *ctx;
+	struct efx_rss_context_priv *priv;
+	struct ethtool_rxfh_context *ctx;
 	struct efx_probe_data *pd;
 	struct efx_nic *efx;
 	int rc;
@@ -313,28 +315,34 @@ static int efx_auxbus_remove_rxfh_context(struct efx_auxdev_client *cdev,
 	efx = &pd->efx;
 	if (!efx->type->rx_push_rss_context_config)
 		return -EOPNOTSUPP;
+	/* Only auxbus-created contexts can be removed through this API */
+	if (rxfh->rss_context < EFX_ONLOAD_RSS_CONTEXT_OFFSET)
+		return -ENOENT;
 
-	mutex_lock(&efx->rss_lock);
+	efx_lock_rss(efx);
 	ctx = efx_find_rss_context_entry(efx, rxfh->rss_context);
 	if (!ctx) {
 		rc = -ENOENT;
 		goto out_unlock;
 	}
 
-	rc = efx->type->rx_push_rss_context_config(efx, ctx, NULL, NULL);
+	priv = ethtool_rxfh_context_priv(ctx);
+	rc = efx->type->rx_push_rss_context_config(efx, priv, NULL, NULL);
 	if (!rc)
-		efx_free_rss_context_entry(ctx);
+		efx_free_rss_context_entry(efx, rxfh->rss_context);
 out_unlock:
-	mutex_unlock(&efx->rss_lock);
+	efx_unlock_rss(efx);
 	return rc;
 }
 
 static int efx_auxbus_modify_rxfh_context(struct efx_auxdev_client *cdev,
 					  struct ethtool_rxfh_param *rxfh)
 {
-	struct efx_rss_context *ctx;
+	struct efx_rss_context_priv *priv;
+	struct ethtool_rxfh_context *ctx;
 	struct efx_probe_data *pd;
 	struct efx_nic *efx;
+	u32 *indir;
 	size_t i;
 	int rc;
 
@@ -357,30 +365,35 @@ static int efx_auxbus_modify_rxfh_context(struct efx_auxdev_client *cdev,
 	efx = &pd->efx;
 	if (!efx->type->rx_push_rss_context_config)
 		return -EOPNOTSUPP;
+	/* Only auxbus-created contexts can be modified through this API */
+	if (rxfh->rss_context < EFX_ONLOAD_RSS_CONTEXT_OFFSET)
+		return -ENOENT;
 
-	mutex_lock(&efx->rss_lock);
+	efx_lock_rss(efx);
 	ctx = efx_find_rss_context_entry(efx, rxfh->rss_context);
 	if (!ctx) {
 		rc = -ENOENT;
 		goto out_unlock;
 	}
+	priv = ethtool_rxfh_context_priv(ctx);
 	if (!rxfh->key)
-		rxfh->key = ctx->rx_hash_key;
-	rxfh->key_size = sizeof(ctx->rx_hash_key);
+		rxfh->key = ethtool_rxfh_context_key(ctx);
+	rxfh->key_size = ctx->key_size;
+	indir = ethtool_rxfh_context_indir(ctx);
 	if (rxfh->indir) {
 		/* Replicate (or truncate) the supplied indirection table
 		 * to fill the full firmware indirection table size.
 		 */
-		for (i = 0; i < ARRAY_SIZE(ctx->rx_indir_table); i++)
-			ctx->rx_indir_table[i] =
-				rxfh->indir[i % rxfh->indir_size];
+		for (i = 0; i < ctx->indir_size; i++)
+			indir[i] = rxfh->indir[i % rxfh->indir_size];
 	}
 
-	rc = efx->type->rx_push_rss_context_config(efx, ctx,
-						   ctx->rx_indir_table,
+	rc = efx->type->rx_push_rss_context_config(efx, priv, indir,
 						   rxfh->key);
+	if (!rc)
+		efx_update_rss_context_entry(ctx, indir, rxfh->key);
 out_unlock:
-	mutex_unlock(&efx->rss_lock);
+	efx_unlock_rss(efx);
 	return rc;
 }
 
@@ -388,9 +401,12 @@ static int efx_auxbus_create_rxfh_context(struct efx_auxdev_client *cdev,
 					  struct ethtool_rxfh_param *rxfh,
 					  u8 num_queues)
 {
-	struct efx_rss_context *ctx;
+	struct efx_rss_context_priv *priv;
+	struct ethtool_rxfh_context *ctx;
 	struct efx_probe_data *pd;
 	struct efx_nic *efx;
+	u32 user_id;
+	u8 *key;
 	int rc;
 
 	if (!client_supports_rss(cdev))
@@ -410,37 +426,39 @@ static int efx_auxbus_create_rxfh_context(struct efx_auxdev_client *cdev,
 	if (!efx->type->rx_push_rss_context_config)
 		return -EOPNOTSUPP;
 
-	mutex_lock(&efx->rss_lock);
-	ctx = efx_alloc_rss_context_entry(efx);
+	efx_lock_rss(efx);
+	ctx = efx_alloc_rss_context_entry(efx, true, &user_id);
 	if (!ctx) {
 		rc = -ENOMEM;
 		goto out_unlock;
 	}
-	if (num_queues > ARRAY_SIZE(ctx->rx_indir_table)) {
+	if (num_queues > ctx->indir_size) {
 		rc = -EOVERFLOW;
-		efx_free_rss_context_entry(ctx);
+		efx_free_rss_context_entry(efx, user_id);
 		goto out_unlock;
 	}
-	ctx->num_queues = num_queues;
+	priv = ethtool_rxfh_context_priv(ctx);
+	priv->num_queues = num_queues;
 	efx_set_default_rx_indir_table(ctx, num_queues);
-	netdev_rss_key_fill(ctx->rx_hash_key, sizeof(ctx->rx_hash_key));
+	key = ethtool_rxfh_context_key(ctx);
+	netdev_rss_key_fill(key, ctx->key_size);
 
-	rc = efx->type->rx_push_rss_context_config(efx, ctx,
-						   ctx->rx_indir_table,
-						   ctx->rx_hash_key);
+	rc = efx->type->rx_push_rss_context_config(efx, priv,
+						   ethtool_rxfh_context_indir(ctx),
+						   key);
 	if (rc) {
-		efx_free_rss_context_entry(ctx);
+		efx_free_rss_context_entry(efx, user_id);
 		goto out_unlock;
 	}
-	rxfh->key = ctx->rx_hash_key;
-	rxfh->key_size = sizeof(ctx->rx_hash_key);
-	rxfh->indir = ctx->rx_indir_table;
-	rxfh->indir_size = ARRAY_SIZE(ctx->rx_indir_table);
+	rxfh->key = key;
+	rxfh->key_size = ctx->key_size;
+	rxfh->indir = ethtool_rxfh_context_indir(ctx);
+	rxfh->indir_size = ctx->indir_size;
 	rxfh->hfunc = ETH_RSS_HASH_TOP;
-	rxfh->rss_context = ctx->user_id;
+	rxfh->rss_context = user_id;
 
 out_unlock:
-	mutex_unlock(&efx->rss_lock);
+	efx_unlock_rss(efx);
 	return rc;
 }
 
@@ -453,6 +471,9 @@ static int efx_auxbus_filter_insert(struct efx_auxdev_client *cdev,
 
 	if (!client_supports_filters(cdev))
 		return -EOPNOTSUPP;
+
+	if (!efx_filter_allow_onload_rss(spec))
+		return -EINVAL;
 
 	filter_id = efx_filter_insert_filter(&pd->efx,
 					     spec, replace_equal);
@@ -488,6 +509,8 @@ static int efx_auxbus_filter_redirect(struct efx_auxdev_client *handle,
 		return -EINVAL;
 	if (!client_supports_filters(handle))
 		return -EOPNOTSUPP;
+	if (!efx_filter_redirect_allow_onload_rss(rss_context))
+		return -EINVAL;
 
 	pd = cdev_to_probe_data(handle);
 	if (!pd)
@@ -652,7 +675,7 @@ static u32 efx_get_queue_type(u32 queue_handle)
 }
 
 static
-int efx_populate_queue_io_window(struct efx_probe_data *pd, u32 offset,
+int efx_populate_queue_io_window(struct efx_probe_data *pd, resource_size_t membase,
 				 u32 stride, u32 max_queues, u32 expected_queue_type,
 				 struct efx_auxiliary_io_window *queue_io_wnd)
 {
@@ -663,7 +686,7 @@ int efx_populate_queue_io_window(struct efx_probe_data *pd, u32 offset,
 		return -EINVAL;
 
 	queue_io_wnd->size = stride;
-	queue_io_wnd->base = efx_llct_mem_phys(pd, offset) + stride * queue_num;
+	queue_io_wnd->base = membase + stride * queue_num;
 	return 0;
 }
 
@@ -673,6 +696,7 @@ static int efx_auxbus_get_param_llct(struct efx_auxdev_client *handle,
 {
 	struct efx_design_params *dp;
 	struct efx_probe_data *pd;
+	resource_size_t membase;
 	struct efx_nic *efx;
 	int rc = 0;
 
@@ -721,8 +745,8 @@ static int efx_auxbus_get_param_llct(struct efx_auxdev_client *handle,
 		if (IS_ERR(dp))
 			return PTR_ERR(dp);
 
-		rc = efx_populate_queue_io_window(pd,
-						  ER_IZ_LLCT_EVQ_UNSOL_CREDIT_GRANT,
+		membase = efx_llct_mem_phys(pd, ER_IZ_LLCT_EVQ_UNSOL_CREDIT_GRANT);
+		rc = efx_populate_queue_io_window(pd, membase,
 						  dp->evq_stride, dp->ev_queues,
 						  MC_CMD_QUEUE_HANDLE_QUEUE_TYPE_LL_EVQ,
 						  &arg->queue_io_wnd);
@@ -732,7 +756,22 @@ static int efx_auxbus_get_param_llct(struct efx_auxdev_client *handle,
 		if (IS_ERR(dp))
 			return PTR_ERR(dp);
 
-		rc = efx_populate_queue_io_window(pd, ER_IZ_LLCT_CTPIO_REGION,
+		membase = efx_llct_mem_phys(pd, ER_IZ_LLCT_CTPIO_REGION);
+		{
+			bool use_cxl_mem;
+
+			rc = efx_cxl_get_config(pd, &use_cxl_mem, NULL);
+			if (rc)
+				return rc;
+
+			if (use_cxl_mem) {
+				rc = efx_cxl_get_ctpio_membase(pd, &membase);
+				if (rc)
+					return rc;
+			}
+		}
+
+		rc = efx_populate_queue_io_window(pd, membase,
 						  dp->tx_aperture_size,
 						  dp->tx_apertures,
 						  MC_CMD_QUEUE_HANDLE_QUEUE_TYPE_LL_TXQ,
@@ -743,10 +782,17 @@ static int efx_auxbus_get_param_llct(struct efx_auxdev_client *handle,
 		if (IS_ERR(dp))
 			return PTR_ERR(dp);
 
-		rc = efx_populate_queue_io_window(pd, ER_IZ_LLCT_RX_BUFFER_POST,
+		membase = efx_llct_mem_phys(pd, ER_IZ_LLCT_RX_BUFFER_POST);
+		rc = efx_populate_queue_io_window(pd, membase,
 						  dp->rx_stride, dp->rx_queues,
 						  MC_CMD_QUEUE_HANDLE_QUEUE_TYPE_LL_RXQ,
 						  &arg->queue_io_wnd);
+		break;
+	case EFX_PARAM_CXL_MEM_ENABLED:
+		rc = efx_cxl_get_config(pd, &arg->b, NULL);
+		break;
+	case EFX_PARAM_CXL_CACHE_ENABLED:
+		rc = efx_cxl_get_config(pd, NULL, &arg->b);
 		break;
 	default:
 		rc = -EOPNOTSUPP;
@@ -826,6 +872,8 @@ static int efx_auxbus_set_param_llct(struct efx_auxdev_client *handle,
 	case EFX_AUXILIARY_EVQ_WINDOW:
 	case EFX_AUXILIARY_CTPIO_WINDOW:
 	case EFX_AUXILIARY_RXQ_WINDOW:
+	case EFX_PARAM_CXL_MEM_ENABLED:
+	case EFX_PARAM_CXL_CACHE_ENABLED:
 		/* These parameters are _get_ only! */
 		rc = -EINVAL;
 		break;
@@ -910,7 +958,8 @@ int efx_aux_set_multicast_loopback_suppression(struct efx_auxdev_client *handle,
 static int efx_auxbus_set_rxfh_flags(struct efx_auxdev_client *cdev,
 				     u32 rss_context, u32 flags)
 {
-	struct efx_rss_context *ctx;
+	struct efx_rss_context_priv *priv;
+	struct ethtool_rxfh_context *ctx;
 	struct efx_probe_data *pd;
 	struct efx_nic *efx;
 	int rc;
@@ -924,20 +973,24 @@ static int efx_auxbus_set_rxfh_flags(struct efx_auxdev_client *cdev,
 	efx = &pd->efx;
 	if (!efx->type->rx_set_rss_flags)
 		return -EOPNOTSUPP;
+	/* Only auxbus-created contexts can be removed through this API */
+	if (rss_context < EFX_ONLOAD_RSS_CONTEXT_OFFSET)
+		return -ENOENT;
 
-	mutex_lock(&efx->rss_lock);
+	efx_lock_rss(efx);
 	ctx = efx_find_rss_context_entry(efx, rss_context);
 	if (!ctx) {
 		rc = -ENOENT;
 		goto out_unlock;
 	}
-	rc = efx->type->rx_set_rss_flags(efx, ctx, flags);
+	priv = ethtool_rxfh_context_priv(ctx);
+	rc = efx->type->rx_set_rss_flags(efx, priv, flags);
 	if (rc)
 		goto out_unlock;
-	ctx->flags = flags;
+	priv->flags = flags;
 
 out_unlock:
-	mutex_unlock(&efx->rss_lock);
+	efx_unlock_rss(efx);
 	return rc;
 }
 
@@ -1202,7 +1255,7 @@ struct efx_auxdev_irq *efx_auxbus_irq_alloc(struct efx_auxdev_client *handle)
 	if (!pd)
 		return ERR_PTR(-EINVAL);
 
-	irq = kzalloc(sizeof(*irq), GFP_KERNEL);
+	irq = kzalloc_obj(*irq);
 	if (!irq)
 		return ERR_PTR(-ENOMEM);
 
@@ -1411,7 +1464,7 @@ int efx_auxbus_add_dev(struct efx_client_type_data *client_type)
 	if (client_type->type_data)
 		return -EALREADY;
 
-	sdev = kzalloc(sizeof(*sdev), GFP_KERNEL);
+	sdev = kzalloc_obj(*sdev);
 	if (!sdev)
 		return -ENOMEM;
 	auxdev = &sdev->auxdev.auxdev;

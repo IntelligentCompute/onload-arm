@@ -12,6 +12,7 @@
 int oo_ubuf_post_mmap(struct file *file, struct vm_area_struct *vma)
 {
   ci_private_t* priv = (ci_private_t*) file->private_data;
+  struct efrm_efct_rxq *rxq;
   resource_size_t io_addr;
   int rc;
 
@@ -24,6 +25,21 @@ int oo_ubuf_post_mmap(struct file *file, struct vm_area_struct *vma)
   if( !priv->thr )
     return -ENODEV;
 
+  if( (offset & ~PAGE_MASK) != 0 )
+    return -EINVAL;
+
+  if( bytes != CI_PAGE_SIZE )
+    return -EINVAL;
+
+  if( intf_i < 0 || intf_i >= oo_stack_intf_max(&priv->thr->netif) )
+    return -EINVAL;
+
+  if( ix < 0 || ix >= EF_VI_MAX_EFCT_RXQS )
+    return -EINVAL;
+  rxq = priv->thr->nic[intf_i].thn_efct_rxq[ix];
+  if( !rxq )
+    return -ENOENT;
+
   TCP_HELPER_RESOURCE_ASSERT_VALID(priv->thr, 0);
   ci_assert((offset & PAGE_MASK) == offset);
   ci_assert(bytes > 0);
@@ -31,7 +47,7 @@ int oo_ubuf_post_mmap(struct file *file, struct vm_area_struct *vma)
   vm_flags_set(vma, EFRM_VM_IO_FLAGS);
   vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
-  io_addr = efrm_rxq_superbuf_window(priv->thr->nic[intf_i].thn_efct_rxq[ix]);
+  io_addr = efrm_rxq_superbuf_window(rxq);
 
   /* This requires a write lock on current->mm->mmap_lock, which has already
    * been acquired (in order to call do_mmap) before reaching this point. */

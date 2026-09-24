@@ -183,41 +183,6 @@ install_slib() {
 }
 
 
-install_solar_clusterd() {
-  local clusterd_lib="$u64/tools/solar_clusterd/cluster_protocol.so"
-  local python_cmd
-  local python_sitelib
-
-  python_cmd="from distutils.sysconfig import get_python_lib; import sys; "
-  python_cmd="$python_cmd sys.stdout.write(get_python_lib(plat_specific=1))"
-  python_sitelib=$(python3 -c "$python_cmd" 2> /dev/null)
-
-  if [ $? != 0 ]; then
-    log "WARNING: solar_clusterd will not be installed as python" \
-        "site-packages location could not be determined." \
-        "(If using SLES10 you need the 'python-devel' package)"
-  elif [ ! -e "$clusterd_lib" ]; then
-    log "Not installing solar_clusterd because it has not been built."
-  else
-    try $do mkdir -p "$i_prefix/$python_sitelib/solar_clusterd"
-
-    # Install built python extension module
-    install_dlib "$clusterd_lib" "$i_prefix/$python_sitelib/solar_clusterd"
-
-    # Install solar_clusterd script and all python files from source folder
-    try $docd "$TOP/src/tools/solar_clusterd" > /dev/null
-
-    install_x solar_clusterd "$i_usrbin/solar_clusterd"
-
-    /bin/ls *.py |
-      while read -r f; do
-        install_f "$f" "$i_prefix/$python_sitelib/solar_clusterd"
-      done;
-
-    try $docd - > /dev/null
-  fi
-}
-
 ######################################################################
 
 install_uninstall() {
@@ -263,7 +228,6 @@ install_userland() {
     install_x "$u64/tools/onload_remote_monitor/orm_json" "$i_usrbin/orm_json"
     install_x "$TOP/src/tools/onload_remote_monitor/orm_webserver" \
               "$i_usrbin/orm_webserver"
-    install_solar_clusterd
   fi
 
   # Install scripts.
@@ -298,7 +262,10 @@ install_userland() {
   [ -f setup.py ] || try $do cp "$TOP/scripts/onload_misc/setup.py" .
   # Python >= 3.12 requires --single-version-externally-managed to generate egg-info.
   local externally_managed=$(python3 setup.py install --help 2>/dev/null | grep -oF -- "--single-version-externally-managed")
-  if [ "$i_usr" = "/usr" ]; then
+  if $packaged && [ -z "$python_install_layout" ]; then
+    # Let the packaging tools own Python packaging
+    true
+  elif [ "$i_usr" = "/usr" ]; then
     # Debian and Ubuntu mess up if --prefix=/usr is set.
     $do python3 setup.py install --record=$python_manifest \
                                  $python_install_layout $externally_managed
@@ -352,7 +319,7 @@ install_ldconfig() {
 
 
 install_adduser() {
-  if [ -n "$i_prefix" ] || [ -f "$i_usr/lib/sysusers.d/" ]; then
+  if [ -n "$i_prefix" ] || [ -d "$i_usr/lib/sysusers.d/" ]; then
     install_f onload_misc/onload.sysusers "$i_usr/lib/sysusers.d/onload.conf"
   fi
 
@@ -628,6 +595,16 @@ calculate_install_paths() {
     usrsharedir="${usrdir}/share"
   fi
 
+  # On merged-/usr systems, writing directly via /sbin can turn a symlink into
+  # a real directory in staged installs. Install these tools into /usr/sbin.
+  if [ "$sbindir" = "/sbin" ] && [ "$usrsbindir" = "/usr/sbin" ]; then
+    if [ -n "$i_prefix" ]; then
+      [ -L "$i_prefix/sbin" ] && sbindir="$usrsbindir"
+    elif [ -L "/sbin" ] && [ "$(readlink -f /sbin)" = "/usr/sbin" ]; then
+      sbindir="$usrsbindir"
+    fi
+  fi
+
   # Where do we put everything?
   i_usr="$i_prefix$usrdir"
   i_usrlibexec="$i_prefix$libexecdir/onload"
@@ -693,6 +670,7 @@ ppc_at=
 noinitramfs=false
 nosfc=false
 python_install_layout=
+packaged=false
 
 sbindir="/sbin"
 usrdir="/usr"
@@ -731,7 +709,7 @@ while [ $# -gt 0 ]; do
   --modulesloadd) all=false; modulesloadd=true;;
   --udev) all=false; udev=true;;
   --examples) all=false; examples=true;;
-  --packaged) set -x; build=false; sfccheck=false; check_install=false uninstall=false;;
+  --packaged) set -x; packaged=true; build=false; sfccheck=false; check_install=false uninstall=false;;
   --uninstall)  uninstall=true;;
   --nouserfiles) userfiles=false;;
   --noldconfig) ldconfig=false;;

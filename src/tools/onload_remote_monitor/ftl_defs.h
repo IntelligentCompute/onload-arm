@@ -256,6 +256,7 @@ typedef struct oo_p_dllink oo_p_dllink_t;
   ) \
   FTL_TFIELD_CONSTINT(ctx, ci_uint32, vi_io_mmap_bytes, ORM_OUTPUT_STACK) \
   FTL_TFIELD_CONSTINT(ctx, ci_uint32, vi_evq_bytes, ORM_OUTPUT_STACK) \
+  FTL_TFIELD_CONSTINT(ctx, ci_uint16, vi_evq_reserved_slots, ORM_OUTPUT_STACK) \
   FTL_TFIELD_CONSTINT(ctx, ci_uint16, vi_instance, ORM_OUTPUT_STACK) \
   FTL_TFIELD_CONSTINT(ctx, ci_uint16, vi_rxq_size, ORM_OUTPUT_STACK) \
   FTL_TFIELD_CONSTINT(ctx, ci_uint16, vi_txq_size, ORM_OUTPUT_STACK) \
@@ -283,6 +284,7 @@ typedef struct oo_p_dllink oo_p_dllink_t;
     FTL_TFIELD_INT(ctx, ci_uint32, ctpio_frame_len_check, ORM_OUTPUT_STACK) \
     FTL_TFIELD_INT(ctx, ci_uint32, ctpio_max_frame_len, ORM_OUTPUT_STACK) \
   ) \
+  FTL_TFIELD_STRUCT(ctx, ef_vi_stats, vi_stats, ORM_OUTPUT_STACK) \
   FTL_TSTRUCT_END(ctx)
 
 #define STRUCT_CI_EPLOCK(ctx) \
@@ -588,7 +590,6 @@ typedef struct oo_p_dllink oo_p_dllink_t;
     FTL_TFIELD_INT(ctx, ci_uint16, dump_read_i, ORM_OUTPUT_STACK)         \
     FTL_TFIELD_INT(ctx, ci_uint16, dump_write_i, ORM_OUTPUT_STACK)        \
   ) \
-  FTL_TFIELD_STRUCT(ctx, ef_vi_stats, vi_stats, ORM_OUTPUT_STACK) \
   FTL_TFIELD_INT(ctx, ci_int32, creation_numa_node, ORM_OUTPUT_STACK)     \
   FTL_TFIELD_INT(ctx, ci_int32, load_numa_node, ORM_OUTPUT_STACK)         \
   FTL_TFIELD_INT(ctx, ci_uint32, packet_alloc_numa_nodes, ORM_OUTPUT_STACK)\
@@ -727,6 +728,7 @@ typedef struct oo_p_dllink oo_p_dllink_t;
     FTL_TFIELD_INT(ctx, ci_uint8, flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))       \
     FTL_TFIELD_IPXADDR(ctx, nexthop, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
     FTL_TFIELD_INT(ctx, ci_mtu_t, mtu, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                     \
+    FTL_TFIELD_INT(ctx, ci_mtu_t, unconstrained_mtu, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                     \
     FTL_TFIELD_INT(ctx, ci_ifid_t, ifindex, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
     FTL_TFIELD_INT(ctx, cicp_encap_t, encap, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
     FTL_TFIELD_INT(ctx, ci_int16, intf_i, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \

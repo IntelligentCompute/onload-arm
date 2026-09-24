@@ -392,8 +392,23 @@ int efx_ethtool_flash_device(struct net_device *net_dev,
 #endif
 
 const struct ethtool_ops efx_ethtool_ops = {
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CAP_RSS_CTX_SUPPORTED)
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_CAP_RSS_CTX_SUPPORTED)
 	.cap_rss_ctx_supported	= true,
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT)
+	.rxfh_priv_size		= sizeof(struct efx_rss_context_priv),
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CAP_RXFH_PER_CTX_FIELDS)
+	.rxfh_per_ctx_fields	= true,
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CAP_RXFH_PER_CTX_KEY)
+	.rxfh_per_ctx_key	= true,
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CAP_RSS_RXNFC_ADDS)
+	.cap_rss_rxnfc_adds	= true,
+#endif
+#ifdef EFX_NOT_UPSTREAM
+	.rxfh_max_num_contexts	= EFX_ONLOAD_RSS_CONTEXT_OFFSET,
+#endif
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_LINK_LANES)
 	.cap_link_lanes_supported = true,
@@ -441,6 +456,9 @@ const struct ethtool_ops efx_ethtool_ops = {
 	.get_rxnfc		= efx_ethtool_get_rxnfc_wrapper,
 	.set_rxnfc		= efx_ethtool_set_rxnfc_wrapper,
 #endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RX_RING_COUNT)
+	.get_rx_ring_count	= efx_ethtool_get_rx_ring_count,
+#endif
 	.get_rxfh_indir_size	= efx_ethtool_get_rxfh_indir_size,
 	.get_rxfh_key_size	= efx_ethtool_get_rxfh_key_size,
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CONFIGURABLE_RSS_HASH)
@@ -453,6 +471,15 @@ const struct ethtool_ops efx_ethtool_ops = {
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_ETHTOOL_RXFH_CONTEXT)
 	.get_rxfh_context	= efx_ethtool_get_rxfh_context,
 	.set_rxfh_context	= efx_ethtool_set_rxfh_context,
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CREATE_RXFH_CONTEXT)
+	.create_rxfh_context	= efx_ethtool_create_rxfh_context,
+	.modify_rxfh_context	= efx_ethtool_modify_rxfh_context,
+	.remove_rxfh_context	= efx_ethtool_remove_rxfh_context,
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_FIELDS)
+	.get_rxfh_fields	= efx_ethtool_get_rxfh_fields,
+	.set_rxfh_fields	= efx_ethtool_set_rxfh_fields,
 #endif
 #ifdef CONFIG_SFC_DUMP
 	.get_dump_flag		= efx_ethtool_get_dump_flag,

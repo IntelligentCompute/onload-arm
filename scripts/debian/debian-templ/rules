@@ -16,7 +16,7 @@
 #export DH_VERBOSE=1
 
 
-
+export PYBUILD_SYSTEM=pyproject
 
 # some default definitions, important!
 #
@@ -228,6 +228,7 @@ binary-indep: build install
 #	dh_installemacsen -i
 #	dh_installpam -i
 #	dh_installmime -i
+#	dh_python3 -i
 #	dh_installinit -i
 #	dh_installcron -i
 #	dh_installinfo -i
@@ -259,9 +260,11 @@ endif
 # Build architecture-dependent files here.
 binary-arch: build install
 	dh_lintian
+	pybuild --verbose --build
 	dh_testdir -a
 	dh_testroot -a
-	dh_installsysusers -a --name=onload || dh_sysuser -a onload_cplane home=/run/openonload
+	cp scripts/onload_misc/onload.sysusers debian/$(userpackage).onload.sysusers
+	dh_installsysusers -a --name=onload
 #	dh_installdebconf -a
 	dh_installdocs -a
 	dh_installexamples -a
@@ -270,6 +273,8 @@ binary-arch: build install
 #	dh_installemacsen -a
 #	dh_installpam -a
 #	dh_installmime -a
+	pybuild --verbose --install --dest-dir debian/$(userpackage)
+	dh_python3 -a
 #	dh_installinit -a
 	dh_installcron -a
 #	dh_installman -a
@@ -291,7 +296,7 @@ ifneq (,$(filter #TYPE#-user,$(DOPACKAGES)))
 	dh_installdirs -p$(userpackage) lib/onload
 
 	i_prefix=$(CURDIR)/debian/$(userpackage) scripts/onload_install --verbose \
-		--packaged --userfiles --modprobe --modulesloadd --python-layout=deb \
+		--packaged --userfiles --modprobe --modulesloadd \
 		$(BUILD_FLAGS) $(SETUID)
 endif
 

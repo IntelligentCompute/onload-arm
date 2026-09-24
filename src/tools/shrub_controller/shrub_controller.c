@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* SPDX-FileCopyrightText: Copyright (C) 2024, Advanced Micro Devices, Inc. */
 
+#define _GNU_SOURCE
+
 #include "cp_intf_ver.h"
 
 #include <stdint.h>
@@ -23,7 +25,8 @@
 #include <etherfabric/vi.h>
 #include <fcntl.h>
 #include <ftw.h>
-#include <getopt.h>
+#include <grp.h>
+#include <ci/app/testapp.h>
 #include <net/if.h>
 #include <onload/driveraccess.h>
 #include <signal.h>
@@ -34,29 +37,42 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <ci/efhw/common.h>
 
+/* Shrub controller lifecycle invariants
+ * - exclusive flock(2) held on /run/onload/controller-N to manage uniqueness
+ * - connect(2) to .../shrub_config to determine readiness
+ * - CWD is controller directory, once created, our natural home even as daemon
+ */
 
 int (*ci_sys_ioctl)(int, long unsigned int, ...) =
     ioctl; /* taken from cplane/private.h (example code from cplane/client.c) */
 
 struct shrub_controller_vi;
 static volatile sig_atomic_t is_running = 1;
-static volatile sig_atomic_t call_shrub_dump = 0;
 
 #define DEFAULT_BUFFER_SIZE 1024 * 1024
+static const mode_t DEFAULT_CLIENT_MODE = 0666;
 
-#define INVALID_SOCKET_FD ((uintptr_t)-1)
+static const int NO_FD = -1;
+static const id_t NO_ID = (id_t) -1;
 
 #define DEV_KMSG "/dev/kmsg"
 #define SERVER_BIN "shrub_controller"
 #define SERVER_NAME "Onload Shrub Server"
+#define POSITIONAL_ARGS "[<interface>[/<buffer_count>]...]"
 
 #define AUTO_CLOSE_DELAY_NEVER -1
+
+#define MS_TO_NS (1000 * 1000)
+#define SEC_TO_NS (1000 * MS_TO_NS)
+#define PERIODIC_POLL_TIMEOUT_DEFAULT (5ll * MS_TO_NS)
+#define PERIODIC_POLL_TIMEOUT_MIN 1ll
 
 static char* shrub_log_prefix;
 
@@ -66,6 +82,8 @@ struct shrub_controller_stats
   uint64_t controller_response_failures;
   uint64_t controller_incompatible_clients;
   uint64_t controller_failed_to_neg_client;
+  uint64_t epoll_failures;
+  uint64_t timerfd_settime_failures;
 };
 
 struct shrub_controller_vi
@@ -92,38 +110,61 @@ typedef struct shrub_if_config_s
 typedef struct
 {
   int interface_token;
-  uintptr_t config_socket_fd;
+  int config_socket_fd;
   int epoll_fd;
   int controller_id;
-  int config_socket_lock_fd;
+  int dir_fd;
   shrub_if_config_t *server_config_head;
   struct oo_cplane_handle *cp;
   int oo_fd_handle;
   bool debug_mode;
   bool use_interrupts;
+  bool daemonise;
+  bool log_to_kern;
   char controller_dir[EF_SHRUB_SOCKET_DIR_LEN];
-  char log_dir[EF_SHRUB_LOG_LEN];
-  char config_socket[EF_SHRUB_NEGOTIATION_SOCKET_LEN];
-  char config_socket_lock[EF_SHRUB_CONFIG_SOCKET_LOCK_LEN];
   struct shrub_controller_stats controller_stats;
   int auto_close_delay;
   bool had_any_clients;
+  uint64_t sum_server_buffers;
+  int wakeup_epoll_fd;
+  int wakeup_timer_fd;
+  long long periodic_poll_timeout_ns;
+  id_t uid;
+  id_t gid;
+  id_t client_gid;
+  mode_t client_mode;
 } shrub_controller_config;
 
-static void usage(void)
-{
-  fprintf(stderr, "Usage:\n");
-  fprintf(stderr, "  shrub_controller <flags> "
-                  "[<interface>[/<buffer_count>]]...\n");
-  fprintf(stderr, "Options:\n");
-  fprintf(stderr, "  -d       Enable debug mode\n");
-  fprintf(stderr, "  -i       Enable interrupts\n");
-  fprintf(stderr, "  -c <id>  Set controller_id (valid values 0 - %d)\n",
-          EF_SHRUB_MAX_CONTROLLER);
-  fprintf(stderr, "  -D       Daemonise on startup\n");
-  fprintf(stderr, "  -K       Log to kmsg\n");
-  fprintf(stderr, "  -C <ms>  Close after <ms> if all clients disconnect\n");
-}
+size_t get_config_definitions(ci_cfg_desc **defs,
+                              shrub_controller_config *config) {
+  ci_cfg_desc cfg_opts[] = {
+    { 'c', "controller-id", CI_CFG_INT,    &config->controller_id,
+      "controller id in range [0, " OO_STRINGIFY(EF_SHRUB_MAX_CONTROLLER) "]" },
+    { 'd', NULL,            CI_CFG_BOOL,   &config->debug_mode,
+      "enable debug mode" },
+    { 'i', "interrupts",    CI_CFG_BOOL,   &config->use_interrupts,
+      "use interrupt-driven mode" },
+    { 'D', "daemonise",     CI_CFG_BOOL,   &config->daemonise,
+      "run in the background" },
+    { 'K', "log-to-kmsg",   CI_CFG_BOOL,   &config->log_to_kern,
+      "log to kmsg" },
+    { 'C', "auto-close",    CI_CFG_UINT,   &config->auto_close_delay,
+      "milliseconds after last client disconnects to close and exit" },
+    { 'p', "poll",          CI_CFG_UINT64, &config->periodic_poll_timeout_ns,
+      "nanoseconds within which to poll when in interrupt-driven mode" },
+    { 0,   "uid",           CI_CFG_ID,     &config->uid,
+      "Drop privileges to this UID after start" },
+    { 0,   "gid",           CI_CFG_ID,     &config->gid,
+      "Drop privileges to this GID after start, see also --uid option" },
+    { 0,   "client-gid",    CI_CFG_ID,     &config->client_gid,
+      "Group id allowed to connect to controller when restricted" },
+    { 0,   "client-mode",   CI_CFG_MODE,   &config->client_mode,
+      "Mode for shrub sockets, determining client access rights" },
+  };
+  if( (*defs = malloc(sizeof cfg_opts)) )
+    memcpy(*defs, cfg_opts, sizeof cfg_opts);
+  return sizeof cfg_opts / sizeof *cfg_opts;
+};
 
 static bool is_hwport_llct(shrub_controller_config *config, ci_hwport_id_t hwport)
 {
@@ -250,11 +291,14 @@ static int add_server_config(shrub_controller_config *config,
   new_shrub_config->server_started = false;
   config->interface_token++;
   config->server_config_head = new_shrub_config;
+  config->sum_server_buffers += buffer_count;
   return 0;
 }
 
-static void shrub_server_fini(shrub_if_config_t *config)
+static void shrub_server_fini(shrub_controller_config* controller_config,
+                              shrub_if_config_t *config)
 {
+  controller_config->sum_server_buffers -= config->buffer_count;
   if ( config->server_started ) {
     ef_shrub_server_close(config->shrub_server);
     ef_vi_free(&config->res.vi, config->res.dh);
@@ -273,7 +317,7 @@ static void remove_and_stop_interface(shrub_controller_config *config,
     if ( current_interface->token_id == intf_token ) {
       current_interface->ref_count--;
       if ( current_interface->ref_count <= 0 ) {
-        shrub_server_fini(current_interface);
+        shrub_server_fini(config, current_interface);
 
         if ( prev_interface != NULL )
           prev_interface->next = current_interface->next;
@@ -299,8 +343,8 @@ static int shrub_server_init(shrub_controller_config *config,
   struct shrub_controller_vi *res = &interface_config->res;
 
   char server_path[EF_SHRUB_SERVER_SOCKET_LEN];
-  rc = snprintf(server_path, sizeof(server_path), "%s" EF_SHRUB_SHRUB_FORMAT,
-                config->controller_dir, interface_config->token_id);
+  rc = snprintf(server_path, sizeof(server_path), EF_SHRUB_SHRUB_FORMAT,
+                interface_config->token_id);
   if ( rc < 0 || rc >= sizeof(server_path) ) {
     ci_log("Error: shrub_controller failed to set server path");
     return -EINVAL;
@@ -329,7 +373,8 @@ static int shrub_server_init(shrub_controller_config *config,
   rc = ef_shrub_server_open(&res->vi, &interface_config->shrub_server,
                             server_path, DEFAULT_BUFFER_SIZE,
                             interface_config->buffer_count,
-                            config->use_interrupts);
+                            config->use_interrupts,
+                            &config->wakeup_epoll_fd);
   if ( rc != 0 ) {
     ci_log("Error: shrub_controller failed to call server open");
     goto fail_server_alloc;
@@ -348,19 +393,13 @@ fail_pd_alloc:
   return rc;
 }
 
-static int directory_exists(const char *path)
-{
-  struct stat path_stat;
-  return (stat(path, &path_stat) == 0 && S_ISDIR(path_stat.st_mode) ? 1 : 0);
-}
-
 static int create_directory(const char *path)
 {
   int rc = 0;
   if ( mkdir(path, 0755) == 0 || errno == EEXIST )
     return rc;
   rc = -errno;
-  ci_log("Error: shrub_controller failed to create the directory '%s'", path);
+  ci_log("Error: shrub_controller failed to create directory '%s': %s", path, strerror(-rc));
   return rc;
 }
 
@@ -374,8 +413,8 @@ static void shrub_dump_summary_to_fd(int fd, shrub_controller_config *config,
   shrub_log_to_fd(fd, buf, buflen, "  dir: %s\n", config->controller_dir);
   shrub_log_to_fd(fd, buf, buflen, "  interrupt mode: %s\n",
                   config->use_interrupts ? "enabled" : "disabled");
-  shrub_log_to_fd(fd, buf, buflen, "  config socket: %s\n",
-                  config->config_socket);
+  shrub_log_to_fd(fd, buf, buflen, "  config socket: %s" EF_SHRUB_NEGOTIATION_SOCKET "\n",
+                  config->controller_dir);
 }
 
 static void shrub_dump_stats_to_fd(int fd, shrub_controller_config *config,
@@ -391,6 +430,10 @@ static void shrub_dump_stats_to_fd(int fd, shrub_controller_config *config,
                   config->controller_stats.controller_response_failures);
   shrub_log_to_fd(fd, buf, buflen, "  incompatible clients detected: %lu\n",
                   config->controller_stats.controller_incompatible_clients);
+  shrub_log_to_fd(fd, buf, buflen, "  epoll failures: %lu\n",
+                  config->controller_stats.epoll_failures);
+  shrub_log_to_fd(fd, buf, buflen, "  timerfd set time failures: %lu\n",
+                  config->controller_stats.timerfd_settime_failures);
 }
 
 static void shrub_dump_server_to_fd(int fd, shrub_if_config_t *server_config,
@@ -437,40 +480,6 @@ static void shrub_dump_to_fd(int fd, shrub_controller_config *config,
   shrub_dump_stats_to_fd(fd, config, buf, buflen);
 }
 
-#define LOGBUF_SIZE 256
-static int shrub_dump_to_file(shrub_controller_config *config,
-                              const char *file_name)
-{
-  char file_path[EF_SHRUB_LOG_LEN];
-  char logbuf[LOGBUF_SIZE];
-  int rc = 0;
-  int fd;
-
-  rc = snprintf(file_path, sizeof(file_path), "%s/%s", config->log_dir,
-                file_name);
-  if ( rc < 0 || rc >= sizeof(file_path) ) {
-    ci_log("Error: shrub_controller was unable "
-           "to set an appropriate log path!");
-    return -EINVAL;
-  }
-
-  if ( !directory_exists(config->log_dir) )
-    create_directory(config->log_dir);
-
-  fd = open(file_path, O_WRONLY | O_CREAT, S_IRUSR | S_IRGRP);
-  if ( fd < 0 ) {
-    rc = -errno;
-    ci_log("Error: shrub_controller was unable "
-           "to open a file for shrub dump!");
-    return rc;
-  }
-
-  shrub_dump_to_fd(fd, config, logbuf, LOGBUF_SIZE);
-
-  close(fd);
-  return rc;
-}
-
 static int shrub_dump(shrub_controller_config *config, int fd, size_t bufsize)
 {
   char *buf = malloc(bufsize);
@@ -482,53 +491,61 @@ static int shrub_dump(shrub_controller_config *config, int fd, size_t bufsize)
   return 0;
 }
 
-static int create_onload_config_socket(const char *socket_path, uintptr_t* config_socket_fd, int epoll_fd)
+static int create_onload_config_socket(shrub_controller_config *config)
 {
-  int rc = 0;
   struct epoll_event event;
+  int rc;
 
-  unlink(socket_path);
+  unlinkat(config->dir_fd, EF_SHRUB_NEGOTIATION_SOCKET, 0);
 
-  rc = ef_shrub_socket_open(config_socket_fd);
-  if ( rc < 0 ) {
-    ci_log("Error: shrub_controller onload handshake socket config failed");
-    return rc;
+  {
+    uintptr_t fd_ret;
+    rc = ef_shrub_socket_open(&fd_ret);
+    if ( rc < 0 ) {
+      ci_log("Error: shrub_controller onload handshake socket config failed");
+      config->config_socket_fd = NO_FD;
+      return rc;
+    }
+    config->config_socket_fd = fd_ret;
   }
+  const int fd = config->config_socket_fd;
 
-  rc = ef_shrub_socket_bind(*config_socket_fd, socket_path);
+  rc = ef_shrub_socket_bind(fd, EF_SHRUB_NEGOTIATION_SOCKET);
   if ( rc < 0 ) {
     ci_log("Error: shrub_controller onload socket bind failed");
-    goto cleanup_socket;
+    goto fail_with_socket;
   }
 
   /* We have a connection per-interface per-client. Onload clients will use
    * all interfaces by default, and it's reasonable that many apps are starting
    * up at once, so we need a generous backlog. */
-  rc = ef_shrub_socket_listen(*config_socket_fd, 2048);
+  rc = ef_shrub_socket_listen(fd, 2048);
   if ( rc < 0 ) {
     ci_log("Error: shrub_controller onload socket listen failed");
-    goto cleanup_socket;
+    goto fail_with_socket;
   }
 
   /* Add config_socket_fd to the epoll instance */
-  event.data.fd = *config_socket_fd;
+  event.data.fd = fd;
   event.events = EPOLLIN;
-  if ( epoll_ctl(epoll_fd, EPOLL_CTL_ADD, *config_socket_fd, &event) == -1 ) {
+  if ( epoll_ctl(config->epoll_fd, EPOLL_CTL_ADD, fd, &event) == -1 ) {
     rc = -errno;
-    ci_log("Error: shrub_controller epoll_ctl failed to add config_socket_fd");
-    goto cleanup_socket;
+    ci_log("Error: shrub_controller epoll_ctl failed to add config socket");
+    goto fail_with_socket;
   }
 
-  return rc;
+  ci_assert(rc == 0);
+  return 0;
 
-cleanup_socket:
-  ef_shrub_socket_close_socket(*config_socket_fd);
+fail_with_socket:
+  ef_shrub_socket_close_socket(fd);
+  config->config_socket_fd = NO_FD;
   return rc;
 }
 
 static int process_create_command(shrub_controller_config *config,
                                   ci_hwport_id_t hw_port, int ifindex,
-                                  uint32_t buffer_count, uintptr_t client_fd)
+                                  uint32_t buffer_count, int client_fd)
 {
   int rc = search_for_existing_server(config, hw_port);
 
@@ -580,13 +597,13 @@ static int poll_socket(shrub_controller_config *config)
   int ifindex = -1;
   struct epoll_event events[max_events];
   int response_status = 0;
-  uintptr_t client_fd = 0;
   int i;
   int num_events = epoll_wait(config->epoll_fd, events, max_events, 0);
 
   for (i = 0; i < num_events; ++i) {
     if ( events[i].data.fd == config->config_socket_fd ) {
-      rc = ef_shrub_socket_accept(config->config_socket_fd, &client_fd);
+      uintptr_t fd_ret;
+      rc = ef_shrub_socket_accept(config->config_socket_fd, &fd_ret);
       if ( rc < 0 ) {
         config->controller_stats.controller_accept_failures++;
         if ( config->debug_mode )
@@ -594,6 +611,7 @@ static int poll_socket(shrub_controller_config *config)
                  "the config socket failed");
         continue;
       }
+      const int client_fd = fd_ret;
 
       response_status = ef_shrub_socket_recv(client_fd, &request, sizeof(request));
 
@@ -643,18 +661,18 @@ static int poll_socket(shrub_controller_config *config)
               config, hw_port, ifindex, buffer_count, client_fd
             );
             break;
-          case EF_SHRUB_CONTROLLER_DUMP_TO_FILE:
-            shrub_dump_to_file(config, request.dump.file_name);
-            break;
           case EF_SHRUB_CONTROLLER_SHRUB_DUMP:
             shrub_dump(config, client_fd, request.shrub_dump.logbuf_size);
+            break;
+          case EF_SHRUB_CONTROLLER_DEFUNCT_DUMP_TO_FILE:
+            response_status = -EOPNOTSUPP;
             break;
           default:
             if ( config->debug_mode ) {
               ci_log("Info: shrub_controller: An unknown command was passed via "
                     "the config socket, command %" PRIu64, request.command);
             }
-            response_status = -1;
+            response_status = -EOPNOTSUPP;
             break;
           }
         }
@@ -680,15 +698,16 @@ static int poll_socket(shrub_controller_config *config)
       ef_shrub_socket_close_socket(client_fd);
     }
   }
-  return rc;
+  return (rc == 0) ? num_events : rc;
 }
 
 static void cleanup_config_socket(shrub_controller_config *config)
 {
   close(config->epoll_fd);
-  if ( config->config_socket_fd != INVALID_SOCKET_FD ) {
+  if ( config->config_socket_fd != NO_FD ) {
     ef_shrub_socket_close_socket(config->config_socket_fd);
-    unlink(config->config_socket);
+    config->config_socket_fd = NO_FD;
+    unlinkat(config->dir_fd, EF_SHRUB_NEGOTIATION_SOCKET, 0);
     if ( config->debug_mode )
       ci_log("Info: shrub_controller socket closed and cleaning up! ");
   }
@@ -705,35 +724,96 @@ static int create_config_socket(shrub_controller_config *config)
     return rc;
   }
 
-  rc = create_onload_config_socket(
-        config->config_socket,
-        &config->config_socket_fd,
-        config->epoll_fd);
+  rc = create_onload_config_socket(config);
   if ( rc < 0 ) {
     close(config->epoll_fd);
     ci_log("Error: shrub_controller failed to create config socket");
-    return rc;
   }
-
-  chmod(config->config_socket, 0666);
-  return 0;
+  return rc;
 }
 
-static void poll_shrub_servers(shrub_controller_config *config)
+static void cleanup_interrupt_state(shrub_controller_config *config)
+{
+  if ( ! config->use_interrupts )
+    return;
+
+  close(config->wakeup_timer_fd);
+  close(config->wakeup_epoll_fd);
+}
+
+static int create_interrupt_state(shrub_controller_config *config)
+{
+  struct epoll_event ev = { 0 };
+  int rc;
+
+  if ( ! config->use_interrupts )
+    return 0;
+
+  rc = epoll_create1(0);
+  if ( rc == -1 ) {
+    rc = -errno;
+    ci_log("Error: failed to create epoll fd for interrupt state: %d (%s)",
+           rc, strerror(-rc));
+    goto fail_out;
+  }
+  config->wakeup_epoll_fd = rc;
+
+  ev.events = EPOLLIN;
+  rc = epoll_ctl(config->wakeup_epoll_fd, EPOLL_CTL_ADD, config->epoll_fd, &ev);
+  if ( rc == -1 ) {
+    rc = -errno;
+    ci_log("Error: failed to add config epoll fd to wakeup epoll set: %d (%s)",
+           rc, strerror(-rc));
+    goto cleanup_socket_out;
+  }
+
+  rc = timerfd_create(CLOCK_MONOTONIC, 0);
+  if ( rc == -1 ) {
+    rc = -errno;
+    ci_log("Error: failed to create timerfd for wakeup timeout: %d (%s)",
+           rc, strerror(-rc));
+    goto cleanup_socket_out;
+  }
+  config->wakeup_timer_fd = rc;
+
+  ev.data.fd = config->wakeup_timer_fd;
+  rc = epoll_ctl(config->wakeup_epoll_fd, EPOLL_CTL_ADD,
+                 config->wakeup_timer_fd, &ev);
+  if ( rc == -1 ) {
+    rc = -errno;
+    ci_log("Error: failed to add timerfd to wakeup epoll set: %d (%s)",
+           rc, strerror(-rc));
+    goto cleanup_timer_out;
+  }
+
+  return 0;
+
+cleanup_timer_out:
+  close(config->wakeup_timer_fd);
+cleanup_socket_out:
+  close(config->wakeup_epoll_fd);
+fail_out:
+  return rc;
+}
+
+static void prime_server_vis(shrub_controller_config *config)
+{
+  shrub_if_config_t *intf;
+  for( intf = config->server_config_head; intf != NULL; intf = intf->next )
+    ef_shrub_server_prime(intf->shrub_server);
+}
+
+static int poll_shrub_servers(shrub_controller_config *config)
 {
   shrub_if_config_t *current_interface = config->server_config_head;
+  int n_events = 0;
+
   while ( current_interface != NULL ) {
-    ef_shrub_server_poll(current_interface->shrub_server);
+    n_events += ef_shrub_server_poll(current_interface->shrub_server);
     current_interface = current_interface->next;
   }
-}
 
-static void handle_controller_dump_requests(shrub_controller_config *config)
-{
-  if ( call_shrub_dump == 1 ) {
-    shrub_dump_to_file(config, "controller-signal.dump");
-    call_shrub_dump = 0;
-  }
+  return n_events;
 }
 
 static int timespec_difference_ms(struct timespec lhs, struct timespec rhs)
@@ -787,25 +867,140 @@ static void handle_controller_auto_close(shrub_controller_config *config)
   is_running = false;
 }
 
-static int reactor_loop(shrub_controller_config *config)
+static bool reactor_loop_step(shrub_controller_config *config)
 {
-  while ( is_running ) {
-    poll_shrub_servers(config);
-    poll_socket(config);
-    handle_controller_dump_requests(config);
-    handle_controller_auto_close(config);
+  int n_events = 0;
+  int rc;
+
+  rc = poll_shrub_servers(config);
+  n_events += (rc > 0) ? rc : 0;
+
+  rc = poll_socket(config);
+  n_events += (rc > 0) ? rc : 0;
+
+  /* We aren't too bothered by if any work was done by non-polling functions */
+  handle_controller_auto_close(config);
+
+  return n_events > 0;
+}
+
+static bool wait_for_wakeup_events(shrub_controller_config *config,
+                                   int timeout)
+{
+  struct epoll_event ev;
+  int rc;
+  rc = epoll_wait(config->wakeup_epoll_fd, &ev, 1, timeout);
+  if ( rc < 0 && errno != EINTR )
+    config->controller_stats.epoll_failures++;
+  return rc > 0 && ev.data.fd != config->wakeup_timer_fd;
+}
+
+static long long get_interrupt_timeout(shrub_controller_config *config)
+{
+  long long timeout = config->periodic_poll_timeout_ns;
+
+  /* If an auto-close delay is set, then to ensure we respect that value we
+   * must reduce our waiting timeout to at most this value. Otherwise the
+   * shrub controller may remain open for longer than requested. */
+  if ( config->auto_close_delay != AUTO_CLOSE_DELAY_NEVER ) {
+    long long auto_close_delay = config->auto_close_delay * MS_TO_NS;
+    timeout = (auto_close_delay < timeout) ? auto_close_delay : timeout;
   }
-  return 0;
+
+  timeout = (timeout < PERIODIC_POLL_TIMEOUT_MIN)
+          ? PERIODIC_POLL_TIMEOUT_MIN : timeout;
+
+  return timeout;
+}
+
+static void reactor_loop_interrupt(shrub_controller_config *config)
+{
+  long long timeout_ns = get_interrupt_timeout(config);
+  int timeout_ms = (timeout_ns + MS_TO_NS - 1) / MS_TO_NS;
+  struct itimerspec timeout_spec = {0};
+
+  /* This should always be true, as the calculation above rounds up to the next
+   * whole millisecond and the number of nanoseconds are guaranteed to be at
+   * least 1. */
+  ci_assert(timeout_ms > 0);
+
+  timeout_spec.it_value.tv_sec = timeout_ns / SEC_TO_NS;
+  timeout_spec.it_value.tv_nsec = timeout_ns -
+                                  (timeout_spec.it_value.tv_sec * SEC_TO_NS);
+
+  prime_server_vis(config);
+
+  while ( is_running ) {
+    /* If we have no servers, then make sure we can actually do some work for
+     * an arbitrary number of steps. */
+    const int max_reactor_steps_per_wakeup =
+      (config->sum_server_buffers > 0) ? config->sum_server_buffers : 16;
+    int reactor_steps_per_wakeup = max_reactor_steps_per_wakeup;
+    bool did_work = true;
+    bool events_ready;
+    int rc;
+
+    rc = timerfd_settime(config->wakeup_timer_fd, 0, &timeout_spec, NULL);
+    if ( rc != 0 )
+      config->controller_stats.timerfd_settime_failures++;
+
+    /* Wait until any of our FDs report that there's something interesting to
+     * do, then try completing work for a bounded number of iterations or
+     * until we run out of work. */
+    events_ready = wait_for_wakeup_events(config, timeout_ms);
+    while ( reactor_steps_per_wakeup-- > 0 && did_work && is_running )
+      did_work = reactor_loop_step(config);
+
+    prime_server_vis(config);
+
+    /* We currently don't get woken up when clients write to their FIFO when
+     * freeing a buffer. This is especially problematic where one client is
+     * slightly behind on freeing buffers as the above loop would only bring
+     * them up-to-date after roughly (timeout * client_bufs / remaining_bufs)ms
+     * which is rather punishing.
+     * To work around this, we try to see if we've done any work after being
+     * woken due to timing out, then spin for a short while (~1ms) to do our
+     * best to let such a client catch up. If at any point we think "normal
+     * service" might resume (i.e., buffers are being filled and other clients
+     * are doing work) then we break back out into our usual workflow. */
+    if ( reactor_steps_per_wakeup < max_reactor_steps_per_wakeup - 1 &&
+         ! events_ready && ! wait_for_wakeup_events(config, 0) &&
+         is_running ) {
+      struct timespec start, now;
+
+      clock_gettime(CLOCK_MONOTONIC, &start);
+      now = start;
+
+      while ( timespec_difference_ms(now, start) < 1 &&
+              ! wait_for_wakeup_events(config, 0) &&
+              reactor_steps_per_wakeup > 0 &&
+              is_running ) {
+        /* We need to give the client some time to see their new buffer(s),
+         * process them, and be ready to free them. It's also slightly
+         * friendlier to deschedule ourselves briefly. */
+        usleep(1);
+        did_work = reactor_loop_step(config);
+        reactor_steps_per_wakeup -= (int)did_work;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+      }
+    }
+  }
+}
+
+static void reactor_loop_spin(shrub_controller_config *config)
+{
+  while ( is_running )
+    reactor_loop_step(config);
 }
 
 int parse_interface(const char *arg, shrub_controller_config *config) {
-  char *buffer_pos = strchr(arg, '/');
+  const char *buffer_pos = strchr(arg, '/');
   char iface[IFNAMSIZ] = {0};
   int buffer_count;
   unsigned int ifindex;
   ci_hwport_id_t hw_port;
   size_t iface_len;
-  char *buffer_str;
+  const char *buffer_str;
 
   if ( buffer_pos ) {
     iface_len = buffer_pos - arg;
@@ -862,12 +1057,19 @@ static void tear_down_servers(shrub_controller_config *config)
       ef_shrub_socket_close_socket(current_interface->client_fd);
 
     if ( current_interface->server_started )
-      shrub_server_fini(current_interface);
+      shrub_server_fini(config, current_interface);
 
     free(current_interface);
     current_interface = next_interface;
   }
   config->server_config_head = NULL;
+}
+
+CI_NORETURN init_failed(const char* msg, ...)
+{
+  va_list args;
+  va_start(args, msg);
+  ci_server_init_failed_v(SERVER_NAME, msg, args);
 }
 
 static int controller_servers_init(shrub_controller_config *config,
@@ -881,7 +1083,8 @@ static int controller_servers_init(shrub_controller_config *config,
     if ( (rc = parse_interface(intfs[i], config)) < 0 ||
         (rc = shrub_server_init(config, config->server_config_head)) < 0) {
       tear_down_servers(config);
-      usage();
+      init_failed("starting server %d of %d for interface '%s'",
+                  i, n_intfs, intfs[i]);
       return  rc;
     }
   }
@@ -890,9 +1093,7 @@ static int controller_servers_init(shrub_controller_config *config,
 
 void controller_signal_handler(int signal, siginfo_t* info, void* context)
 {
-  if ( signal == SIGUSR1 )
-    call_shrub_dump = 1;
-  else if ( signal == SIGTERM || signal == SIGINT || signal == SIGQUIT )
+  if ( signal == SIGTERM || signal == SIGINT || signal == SIGQUIT )
     is_running = 0;
 }
 
@@ -914,11 +1115,6 @@ static void controller_init_signals(void)
     ci_log("Error: shrub_controller sigaction(SIGTERM) failed: %s",
            strerror(errno));
 
-  rc = sigaction(SIGUSR1, &act, NULL);
-  if ( rc < 0 )
-    ci_log("Error: shrub_controller sigaction(SIGUSR1) failed: %s",
-           strerror(errno));
-
   rc = sigaction(SIGQUIT, &act, NULL);
   if ( rc < 0 )
     ci_log("Error: shrub_controller sigaction(SIGQUIT) failed: %s",
@@ -927,107 +1123,94 @@ static void controller_init_signals(void)
 
 static int controller_init_paths(shrub_controller_config *config)
 {
-  int rc;
-
-  rc = snprintf(config->log_dir, sizeof(config->log_dir),
-                EF_SHRUB_CONTROLLER_PATH_FORMAT, "/var/log/",
-                config->controller_id);
-  if ( rc < 0 || rc >= sizeof(config->log_dir) )
-    return -EINVAL;
-
-  rc = snprintf(config->controller_dir, sizeof(config->controller_dir),
-                EF_SHRUB_CONTROLLER_PATH_FORMAT, EF_SHRUB_SOCK_DIR_PATH,
-                config->controller_id);
+  int rc = snprintf(config->controller_dir, sizeof(config->controller_dir),
+                    EF_SHRUB_CONTROLLER_PATH_FORMAT, EF_SHRUB_SOCK_DIR_PATH,
+                    config->controller_id);
   if ( rc < 0 || rc >= sizeof(config->controller_dir) )
-    return -EINVAL;
-
-  rc = snprintf(config->config_socket, sizeof(config->config_socket), "%s%s",
-                config->controller_dir, EF_SHRUB_NEGOTIATION_SOCKET);
-  if ( rc < 0 || rc >= sizeof(config->config_socket) )
     return -EINVAL;
 
   return 0;
 }
 
 static int
-controller_config_socket_lock_create(shrub_controller_config *config)
+controller_open_dir(shrub_controller_config *config)
 {
   int rc;
   int fd;
-  char pid[16];
-  struct flock file_lock = {
-    .l_type = F_WRLCK,
-    .l_start = 0,
-    .l_whence = SEEK_SET,
-    .l_len = 0
-  };
+  mode_t dir_mode;
+  uid_t dir_uid;
+  gid_t dir_gid;
 
-  config->config_socket_lock_fd = -1;
-  rc = snprintf(config->config_socket_lock, sizeof(config->config_socket_lock),
-                "%s%s", config->controller_dir, EF_SHRUB_CONFIG_SOCKET_LOCK);
-  if ( rc < 0 || rc >= sizeof(config->config_socket_lock) )
-    return -EINVAL;
-
-  fd = open(config->config_socket_lock, O_CREAT | O_RDWR,
-            S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-  if ( fd < 0 ) {
-    ci_log("Error: shrub_controller Failed to open config socket lock %s: %s",
-           config->config_socket_lock, strerror(errno));
-    return -errno;
+  fd = open(config->controller_dir, O_RDONLY | O_DIRECTORY);
+  if( fd == -1 && errno == ENOENT ) {
+    rc = create_directory(config->controller_dir);
+    if( rc < 0 )
+      return rc;
+    fd = open(config->controller_dir, O_RDONLY | O_DIRECTORY);
   }
 
-  if ( fcntl(fd, F_SETLK, &file_lock) < 0 ) {
-    if( errno == EACCES || errno == EAGAIN ) {
-      ci_log("Error: shrub_controller %s is already locked. "
-             "Is another shrub controller running?",
-             config->config_socket_lock);
+  if( fd == -1 ) {
+    rc = errno;
+    ci_log("Error: opening shrub_controller directory %s: %s",
+           config->controller_dir, strerror(rc));
+    return -rc;
+  }
+
+  while( (rc = flock(fd, LOCK_EX | LOCK_NB)) == -1 && errno == EINTR );
+  if( rc == -1 ) {
+    rc = errno;
+    if( rc == EWOULDBLOCK ) {
+      if( config->debug_mode )
+        ci_log("Debug: A shrub controller is already serving under id %d, "
+               "we are not needed, so exiting.",
+               config->controller_id);
     } else {
-      ci_log("Error: shrub_controller failed to acquire config "
-             "socket lock %s: %s", config->config_socket_lock,
-             strerror(errno));
+      ci_log("Error: taking shrub_controller lock at %s: %s",
+             config->controller_dir, strerror(rc));
     }
-    close(fd);
-    return -errno;
+    goto fail;
   }
 
-  /* Truncating the file does not set the file offset so if the file
-   * already existed then the file offset will not be zero. Explicitly set the
-   * seek position back to the start of the file. Ignore unlikely errors at
-   * this stage. */
-  if ( -1 == ftruncate(fd, 0) ||
-       -1 == lseek(fd, 0, SEEK_SET) ||
-       -1 == sprintf(pid, "%ld\n", (long)getpid()) ||
-       -1 == write(fd, pid, strlen(pid)+1) ) {
-    ci_log("Error: shrub_controller failed to write to lock file: %s",
-           strerror(errno));
-    close(fd);
-    return -errno;
+  if( fchdir(fd) == -1 ) {
+    rc = errno;
+    ci_log("Error: entering shrub_controller directory: %s", strerror(rc));
+    goto fail;
   }
 
-  config->config_socket_lock_fd = fd;
+  /* Set ownership regardless of whether requested to clear any
+   * stale rights, but only error out if we were configured with
+   * an identity or client group. */
+  dir_gid = config->client_gid != NO_ID ? config->client_gid :
+            (config->gid != NO_ID ? config->gid : getegid());
+  dir_uid = config->uid != NO_ID ? config->uid : geteuid();
+
+  if( (fchown(fd, dir_uid, dir_gid) == -1 ) &&
+      (config->uid != NO_ID || config->gid != NO_ID ||
+       config->client_gid != NO_ID) ) {
+    rc = errno;
+    ci_log("Error: changing shrub_controller dir ownership: %s", strerror(rc));
+    goto fail;
+  }
+
+  /* Ensure contents created under the controller directory
+   * get the client group set (even after we have dropped
+   * to the controller user/group). Give r-x access to the
+   * directory for any clients eligible to connect to sockets */
+  dir_mode = 0700;
+  dir_mode |= config->client_gid == NO_ID ? 0 : S_ISGID;
+  dir_mode |= config->client_mode & 0070 ? 0050 : 0;
+  dir_mode |= config->client_mode & 0007 ? 0005 : 0;
+  if( fchmod(fd, dir_mode) == -1) {
+    rc = errno;
+    ci_log("Error: changing shrub_controller dir mode: %s", strerror(rc));
+    goto fail;
+  }
+
+  config->dir_fd = fd;
   return 0;
-}
-
-static void
-controller_config_socket_lock_destroy(shrub_controller_config *config)
-{
-  if (config->config_socket_lock_fd != -1) {
-    close(config->config_socket_lock_fd);
-    unlink(config->config_socket_lock);
-  }
-}
-
-static int controller_create_directories(shrub_controller_config *config)
-{
-  int rc;
-
-  if ( (rc = create_directory(EF_SHRUB_SOCK_DIR_PATH)) < 0 )
-    return rc;
-
-  if ( (rc = create_directory(config->controller_dir)) < 0 )
-    return rc;
-
-  return 0;
+fail:
+  close(fd);
+  return -rc;
 }
 
 static int controller_cplane_connect(shrub_controller_config *config)
@@ -1067,20 +1250,56 @@ static void controller_cplane_disconnect(shrub_controller_config *config)
   oo_fd_close(config->oo_fd_handle);
 }
 
+static void drop_privileges(shrub_controller_config *config)
+{
+  int rc;
+
+  /* Clear supplementary groups */
+  if( config->gid != NO_ID || config->uid != NO_ID ) {
+    rc = setgroups(0, NULL);
+    if( rc == -1 )
+      init_failed("Failed to drop supplemental groups: %s", strerror(errno));
+  }
+
+  /* Then set GID */
+  if( config->gid != NO_ID ) {
+    rc = setresgid(config->gid, config->gid, config->gid);
+    if( rc == -1 )
+      init_failed("Failed to drop GID to %d: %s", config->gid, strerror(errno));
+  }
+
+  /* And finally set UID */
+  if( config->uid != NO_ID ) {
+    rc = setresuid(config->uid, config->uid, config->uid);
+    if( rc == -1 )
+      init_failed("Failed to drop UID to %d: %s", config->uid, strerror(errno));
+  }
+}
+
 int main(int argc, char *argv[])
 {
   int rc = 0;
-  bool daemonise = false;
-  bool log_to_kern = false;
+  ci_cfg_desc *cfg_opts;
+  size_t cfg_opts_n;
   struct stat stat;
-  int option;
-  shrub_controller_config config = {0};
-  config.config_socket_fd = INVALID_SOCKET_FD;
+
+  ci_app_standard_opts = 0;
+  shrub_controller_config config = {
+    .dir_fd = NO_FD, .config_socket_fd = NO_FD,
+    .uid = NO_ID, .gid = NO_ID,
+    .client_gid = NO_ID,
+    .client_mode = DEFAULT_CLIENT_MODE,
+  };
   config.interface_token = 1;
   config.controller_id = 0;
   config.auto_close_delay = AUTO_CLOSE_DELAY_NEVER;
+  config.periodic_poll_timeout_ns = PERIODIC_POLL_TIMEOUT_DEFAULT;
 
-  /* Set sutable prefix */
+  cfg_opts_n = get_config_definitions(&cfg_opts, &config);
+  if( !cfg_opts )
+    return EXIT_FAILURE;
+
+  /* Set suitable prefix */
   ci_server_set_log_prefix(&shrub_log_prefix, SERVER_BIN);
 
   /* Ensure that early errors are not lost */
@@ -1093,81 +1312,95 @@ int main(int argc, char *argv[])
     }
   }
 
-  while ( (option = getopt(argc, argv, "dic:DKC:")) != -1 ) {
-    switch (option)
-    {
-    case 'd':
-      config.debug_mode = true;
-      ci_log("Info: shrub_controller Debug Mode Enabled!");
-      break;
-    case 'i':
-      config.use_interrupts = true;
-      break;
-    case 'c':
-      config.controller_id = atoi(optarg);
-      if( config.controller_id < 0 ||
-          config.controller_id > EF_SHRUB_MAX_CONTROLLER ) {
-        ci_log("Error: shrub_controller id should be between 0 and %d",
-               EF_SHRUB_MAX_CONTROLLER);
-        usage();
-        return EXIT_FAILURE;
-      }
-      break;
-    case 'D':
-      daemonise = true;
-      break;
-    case 'K':
-      log_to_kern = true;
-      break;
-    case 'C':
-      config.auto_close_delay = atoi(optarg);
-      break;
-    default:
-      usage();
-      return EXIT_FAILURE;
-    }
+  ci_app_getopt(POSITIONAL_ARGS, &argc, argv, cfg_opts, cfg_opts_n);
+
+  if( config.debug_mode )
+    ci_log("Info: shrub_controller Debug Mode Enabled!");
+  if( config.controller_id < 0 ||
+      config.controller_id > EF_SHRUB_MAX_CONTROLLER ) {
+    ci_log("Error: shrub_controller id should be between 0 and %d",
+           EF_SHRUB_MAX_CONTROLLER);
+    ci_app_opt_usage(cfg_opts, cfg_opts_n);
+    return EXIT_FAILURE;
+  }
+  if( config.periodic_poll_timeout_ns < PERIODIC_POLL_TIMEOUT_MIN ) {
+    ci_log("Error: periodic poll timeout must be at least %lldns",
+           PERIODIC_POLL_TIMEOUT_MIN);
+    ci_app_opt_usage(cfg_opts, cfg_opts_n);
+    return EXIT_FAILURE;
   }
 
-  if( daemonise )
-    ci_server_daemonise(log_to_kern, &shrub_log_prefix, SERVER_NAME,
-                        SERVER_BIN);
+  if( config.daemonise )
+    close_range(STDERR_FILENO + 1, ~0U, 0);
 
   controller_init_signals();
   rc = controller_init_paths(&config);
   if ( rc )
-    return rc;
+    goto fail_early_init;
 
-  rc = controller_create_directories(&config);
+  /* Ensure Onload runtime directory */
+  umask(0022);
+  rc = create_directory(EF_SHRUB_SOCK_DIR_PATH);
   if ( rc )
-    return rc;
+    goto fail_early_init;
 
-  rc = controller_config_socket_lock_create(&config);
+  /* Ensure, open and lock controller runtime directory */
+  rc = controller_open_dir(&config);
   if ( rc )
     goto fail_socket_lock_create;
 
+  /* Apply this umask for the next (rest-of-life) phase of the controller */
+  umask(~config.client_mode & 0777);
   rc = create_config_socket(&config);
   if ( rc )
     goto fail_create_config_socket;
+
+  rc = create_interrupt_state(&config);
+  if( rc )
+    goto fail_create_interrupt_state;
+
+  /* Satisfy readiness invariant by daemonising only once config created. */
+  if( config.daemonise ) {
+    ci_server_daemonise(&shrub_log_prefix,
+                        SERVER_NAME, SERVER_BIN,
+                        (config.log_to_kern ? CI_DAEMON_LOG_TO_KERN : 0));
+
+    /* Restore after umask was reset by daemonise helper */
+    umask(~config.client_mode & 0777);
+  }
 
   rc = controller_cplane_connect(&config);
   if ( rc )
     goto fail_cplane_connect;
 
-  rc = controller_servers_init(&config, &argv[optind], argc - optind);
+  rc = controller_servers_init(&config, &argv[1], argc - 1);
   if ( rc )
     goto fail_servers_init;
 
-  reactor_loop(&config);
+  drop_privileges(&config);
+
+  if( config.use_interrupts )
+    reactor_loop_interrupt(&config);
+  else
+    reactor_loop_spin(&config);
 
   tear_down_servers(&config);
 fail_servers_init:
   controller_cplane_disconnect(&config);
 fail_cplane_connect:
+  cleanup_interrupt_state(&config);
+fail_create_interrupt_state:
   cleanup_config_socket(&config);
 fail_create_config_socket:
-  controller_config_socket_lock_destroy(&config);
+  close(config.dir_fd);
 fail_socket_lock_create:
-  rmdir(config.controller_dir);
+  /* If the lock is already taken, this is not an error because controllers
+   * are started eagerly; we simply aren't needed! */
+  if( rc == -EWOULDBLOCK )
+    rc = 0;
+  /* Do not delete the runtime directory: this is racy and unnecessary */
+fail_early_init:
+  free(cfg_opts);
 
   return rc;
 }

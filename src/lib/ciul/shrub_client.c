@@ -130,6 +130,7 @@ int ef_shrub_client_open(struct ef_shrub_client* client,
   struct ef_shrub_shared_metrics metrics;
   struct ef_shrub_request request = {};
   memset(client, 0, sizeof(*client));
+  client->mappings[EF_SHRUB_MAP_SOCKET] = EF_SHRUB_NO_SOCKET;
 
   rc = ef_shrub_socket_open(&client->socket);
   if( rc < 0 )
@@ -155,6 +156,11 @@ int ef_shrub_client_open(struct ef_shrub_client* client,
   if( rc < 0 )
     goto fail_mmap;
 
+  /* Store the socket in the mappings array so that the kernel can take a
+   * reference on it to keep the shrub controller connection alive when the
+   * owning process exits. */
+  client->mappings[EF_SHRUB_MAP_SOCKET] = client->socket;
+
   return 0;
 
 fail_mmap:
@@ -168,6 +174,18 @@ void ef_shrub_client_close(struct ef_shrub_client* client)
 {
   client_munmap(client->mappings, &get_state(client)->metrics);
   ef_shrub_socket_close_socket(client->socket);
+}
+
+void ef_shrub_client_release_fds(struct ef_shrub_client* client)
+{
+  int i;
+  for( i = 0; i < EF_SHRUB_FD_COUNT; ++i ) {
+    ef_shrub_socket_close_file(client->mappings[i]);
+    client->mappings[i] = EF_SHRUB_DUMMY_SOCKET;
+  }
+  ef_shrub_socket_close_socket(client->socket);
+  client->socket = EF_SHRUB_DUMMY_SOCKET;
+  client->mappings[EF_SHRUB_MAP_SOCKET] = EF_SHRUB_DUMMY_SOCKET;
 }
 
 int ef_shrub_client_acquire_buffer(struct ef_shrub_client* client,

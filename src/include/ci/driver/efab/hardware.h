@@ -140,6 +140,10 @@
 	((nic)->efhw_func->max_shared_rxqs ? \
 	 (nic)->efhw_func->max_shared_rxqs((nic)) : 0)
 
+#define efhw_nic_evq_reserved_slots(nic) \
+	((nic)->efhw_func->evq_reserved_slots ? \
+	 (nic)->efhw_func->evq_reserved_slots((nic)) : 1)
+
 #define efhw_nic_queue_map_type(nic) \
 	((nic)->efhw_func->queue_map_type ? \
 	 (nic)->efhw_func->queue_map_type((nic)) : EFHW_PAGE_MAP_DMA)
@@ -267,19 +271,11 @@
 	 (nic)->efhw_func->ctpio_addr((nic), (instance), (addr)) : -ENOSYS)
 
 /*-------------- superbufs ------------------------ */
-#define efhw_nic_rxq_window(nic, instance, addr_out) \
-	((nic)->efhw_func->rxq_window ? \
-	 (nic)->efhw_func->rxq_window((nic), (instance), (addr_out)) : \
-	 -EOPNOTSUPP)
-
 #define efhw_nic_post_superbuf(nic, instance, addr, sentinel, rollover, owner_id) \
 	((nic)->efhw_func->post_superbuf ? \
 	 (nic)->efhw_func->post_superbuf((nic), (instance), (addr), \
 					 (sentinel), (rollover), (owner_id)) : \
 	 -EOPNOTSUPP)
-#define efhw_nic_shared_rxq_alloc(nic) \
-	((nic)->efhw_func->shared_rxq_alloc ? \
-	 (nic)->efhw_func->shared_rxq_alloc((nic)) : -EOPNOTSUPP)
 #define efhw_nic_shared_rxq_bind(nic, params) \
 	((nic)->efhw_func->shared_rxq_bind ? \
 	 (nic)->efhw_func->shared_rxq_bind((nic), (params)) : -EOPNOTSUPP)

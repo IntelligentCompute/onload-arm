@@ -250,7 +250,6 @@ struct efx_pps_dev_attr {
  * @phc_clock_info: Registration structure for phc device
  * @pps_work: pps work task for handling pps events
  * @pps_workwq: pps work queue
- * @pin_config: Function of the EXTTS pin.
  * @usr_evt_enabled: Flag indicating how NIC generated TS events are handled
  * @sw_stats: Driver level statistics.
  * @sw_stats.good_syncs: Number of successful synchronisations.
@@ -270,6 +269,7 @@ struct efx_pps_dev_attr {
  * @initial_mc_stats: Firmware statistics.
  * @timeset: Last set of synchronisation statistics.
  * @xmit_skb: Transmit SKB function.
+ * @pps_connector_caps: Capabilities for each PPS connector.
  */
 struct efx_ptp_data {
 	struct efx_nic *efx;
@@ -343,7 +343,11 @@ struct efx_ptp_data {
 	struct efx_pps_data *pps_data;
 #endif
 #if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
-	struct ptp_pin_desc pin_config[1];
+	/**
+	 * @pps_set_connector_funcs: FW support for
+	 *			     MC_CMD_PTP_OP_SET_CONNECTOR_FUNCTION
+	 */
+	bool pps_set_connector_funcs;
 	u8 usr_evt_enabled;
 #endif
 	struct {
@@ -408,6 +412,7 @@ struct efx_ptp_data {
 	struct efx_ptp_timeset
 	timeset[MC_CMD_PTP_OUT_SYNCHRONIZE_TIMESET_MAXNUM];
 	void (*xmit_skb)(struct efx_nic *efx, struct sk_buff *skb);
+	u8 pps_connector_caps[MC_CMD_PTP_OUT_GET_ATTRIBUTES_V3_PPS_CONNECTOR_CAPS_NUM];
 };
 
 #if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
@@ -1011,7 +1016,7 @@ int efx_ef10_ptp_get_attributes(struct efx_nic *efx)
 
 int efx_x4_ptp_get_attributes(struct efx_nic *efx)
 {
-	MCDI_DECLARE_BUF(outbuf, MC_CMD_PTP_OUT_GET_ATTRIBUTES_V2_LEN);
+	MCDI_DECLARE_BUF(outbuf, MC_CMD_PTP_OUT_GET_ATTRIBUTES_V3_LEN);
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_PTP_IN_GET_ATTRIBUTES_LEN);
 	struct efx_ptp_data *ptp = efx->ptp_data;
 	s64 freq_adj_min, freq_adj_max;
@@ -1088,6 +1093,19 @@ int efx_x4_ptp_get_attributes(struct efx_nic *efx)
 	}
 
 	ptp->max_adjfine = ppb_to_ppm_fp16(ptp->max_adjfreq);
+
+	if (out_len < MC_CMD_PTP_OUT_GET_ATTRIBUTES_V3_LEN) {
+		memset(ptp->pps_connector_caps, 0,
+		       MC_CMD_PTP_OUT_GET_ATTRIBUTES_V3_PPS_CONNECTOR_CAPS_NUM *
+		       MC_CMD_PTP_OUT_GET_ATTRIBUTES_V3_PPS_CONNECTOR_CAPS_LEN);
+	} else {
+		ptp->pps_connector_caps[0] =
+			MCDI_ARRAY_BYTE(outbuf,
+					PTP_OUT_GET_ATTRIBUTES_V3_PPS_CONNECTOR_CAPS, 0);
+		ptp->pps_connector_caps[1] =
+			MCDI_ARRAY_BYTE(outbuf,
+					PTP_OUT_GET_ATTRIBUTES_V3_PPS_CONNECTOR_CAPS, 1);
+	}
 
 	return 0;
 }
@@ -1227,25 +1245,25 @@ static void efx_ptp_send_times(struct efx_nic *efx,
 	struct timespec64 ts_real;
 	ktime_t limit;
 
-	ktime_get_snapshot(&now);
+	ktime_get_snapshot_id(CLOCK_REALTIME, &now);
 	/* Initialise ts_real in case the MC is very fast and the while loop
 	 * below is skipped.
 	 */
-	ts_real = ktime_to_timespec64(now.real);
-	limit = ktime_add_ns(now.real, SYNCHRONISE_PERIOD_NS);
+	ts_real = ktime_to_timespec64(now.systime);
+	limit = ktime_add_ns(now.systime, SYNCHRONISE_PERIOD_NS);
 
 	/* Write host time for specified period or until MC is done */
-	while ((ktime_compare(now.real, limit) < 0) &&
+	while ((ktime_compare(now.systime, limit) < 0) &&
 	       READ_ONCE(*mc_running) && !READ_ONCE(mcdi_data->done)) {
 		ktime_t update_time;
 		unsigned int host_time;
 
 		/* Don't update continuously to avoid saturating the PCIe bus */
-		update_time = ktime_add_ns(now.real,
+		update_time = ktime_add_ns(now.systime,
 					   SYNCHRONISATION_GRANULARITY_NS);
 		do {
-			ktime_get_snapshot(&now);
-		} while ((ktime_compare(now.real, update_time) < 0) &&
+			ktime_get_snapshot_id(CLOCK_REALTIME, &now);
+		} while ((ktime_compare(now.systime, update_time) < 0) &&
 			 READ_ONCE(*mc_running));
 
 		/* Synchronize against the MCDI completion to ensure we don't
@@ -1255,10 +1273,10 @@ static void efx_ptp_send_times(struct efx_nic *efx,
 		spin_lock_bh(&mcdi_data->done_lock);
 
 		/* Read time again to make sure we're as up-to-date as possible */
-		ktime_get_snapshot(&now);
+		ktime_get_snapshot_id(CLOCK_REALTIME, &now);
 
 		/* Synchronise NIC with single word of time only */
-		ts_real = ktime_to_timespec64(now.real);
+		ts_real = ktime_to_timespec64(now.systime);
 		host_time = (ts_real.tv_sec << MC_NANOSECOND_BITS |
 			     ts_real.tv_nsec);
 
@@ -1269,7 +1287,7 @@ static void efx_ptp_send_times(struct efx_nic *efx,
 		spin_unlock_bh(&mcdi_data->done_lock);
 	}
 	*last_time_real = ts_real;
-	*last_time_raw = ktime_to_timespec64(now.raw);
+	*last_time_raw = ktime_to_timespec64(now.monoraw);
 #ifdef CONFIG_DEBUG_FS
 	ptp->last_sync_time_host = (unsigned int)ts_real.tv_nsec;
 #endif
@@ -1537,7 +1555,7 @@ int efx_ef10_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 	static const unsigned int PTP_START_TIMEOUT = PTP_SYNC_TIMEOUT * 4;
 	unsigned long started;
 
-	mcdi_data = kmalloc(sizeof(*mcdi_data), GFP_KERNEL);
+	mcdi_data = kmalloc_obj(*mcdi_data);
 	if (!mcdi_data)
 		return -ENOMEM;
 
@@ -1680,9 +1698,7 @@ int efx_x4_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 	ngood = last_good = diff_avg = diff_total = 0;
 	diff_min = LONG_MAX;
 
-	timeset = kmalloc_array(num_readings,
-				sizeof(struct efx_x4_ptp_timeset),
-				GFP_KERNEL);
+	timeset = kmalloc_objs(struct efx_x4_ptp_timeset, num_readings);
 	if (!timeset)
 		return -ENOMEM;
 
@@ -1706,9 +1722,9 @@ int efx_x4_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 		}
 	}
 
-	ktime_get_snapshot(&last_time);
-	last_time_real = ktime_to_timespec64(last_time.real);
-	last_time_raw = ktime_to_timespec64(last_time.raw);
+	ktime_get_snapshot_id(CLOCK_REALTIME, &last_time);
+	last_time_real = ktime_to_timespec64(last_time.systime);
+	last_time_raw = ktime_to_timespec64(last_time.monoraw);
 
 	if (ngood == 0) {
 		rc = -EAGAIN;
@@ -1925,7 +1941,7 @@ static int efx_ptp_insert_filter(struct efx_nic *efx,
 		goto out;
 	}
 
-	rxfilter = kzalloc(sizeof(*rxfilter), GFP_KERNEL);
+	rxfilter = kzalloc_obj(*rxfilter);
 	if (!rxfilter) {
 		rc = -ENOMEM;
 		goto out;
@@ -2358,7 +2374,7 @@ static int efx_phc_enable(struct ptp_clock_info *ptp,
 
 	switch (request->type) {
 	case PTP_CLK_REQ_EXTTS:
-		if (ptp_data->pin_config[0].func != PTP_PF_EXTTS)
+		if (ptp->pin_config[0].func != PTP_PF_EXTTS)
 			enable = false;
 
 #ifdef EFX_NOT_UPSTREAM
@@ -2379,6 +2395,216 @@ static int efx_phc_enable(struct ptp_clock_info *ptp,
 	return 0;
 }
 
+static int efx_ptp_connector_func_to_pin_func(unsigned int func)
+{
+	switch (func) {
+	case PPS_CONNECTOR_FUNCTION_PPS_NONE:
+		return PTP_PF_NONE;
+	case PPS_CONNECTOR_FUNCTION_PPS_IN:
+		return PTP_PF_EXTTS;
+	case PPS_CONNECTOR_FUNCTION_PPS_OUT:
+		return PTP_PF_PEROUT;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static int efx_ptp_set_connector_funcs(struct efx_nic *efx)
+{
+	struct ptp_clock_info *clock_info = &efx->ptp_data->phc_clock_info;
+	size_t outlen, outlen_actual, pins, i;
+	MCDI_DECLARE_STRUCT_PTR(connector);
+	efx_dword_t *inbuf, *outbuf;
+	int rc = -ENOMEM;
+	size_t inlen;
+	int func;
+
+	BUILD_BUG_ON(MC_CMD_PTP_OUT_SET_CONNECTOR_FUNCTION_LENMIN != 0);
+
+	inlen = MC_CMD_PTP_IN_SET_CONNECTOR_FUNCTION_LEN(0);
+	inbuf = kzalloc(inlen, GFP_KERNEL);
+	if (!inbuf)
+		return rc;
+
+	outlen = MC_CMD_PTP_OUT_SET_CONNECTOR_FUNCTION_LENMAX_MCDI2;
+	outbuf = kzalloc(outlen, GFP_KERNEL);
+	if (!outbuf)
+		goto free_inbuf;
+
+	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_SET_CONNECTOR_FUNCTION);
+
+	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_PTP, inbuf, inlen,
+				outbuf, outlen, &outlen_actual);
+	if (rc) {
+		/* EINVAL or ENOENT occur when firmware doesn't support _OP */
+		if (rc != -EINVAL && rc != -ENOENT)
+			efx_mcdi_display_error(efx, MC_CMD_PTP, inlen,
+					       outbuf, outlen_actual, rc);
+		goto free_outbuf;
+	}
+
+	pins = MC_CMD_PTP_OUT_SET_CONNECTOR_FUNCTION_FUNCTION_NUM(outlen_actual);
+	if (!clock_info->pin_config) {
+		clock_info->pin_config = kcalloc(pins, sizeof(*clock_info->pin_config),
+						 GFP_KERNEL);
+		if (!clock_info->pin_config) {
+			rc = -ENOMEM;
+			goto free_outbuf;
+		}
+		clock_info->n_pins = pins;
+	}
+
+	/* Shouldn't happen */
+	if (pins != clock_info->n_pins) {
+		pci_warn(efx->pci_dev,
+			 "Expecting (%u) PPS connectors. Got (%zu) PPS connectors",
+			 clock_info->n_pins, pins);
+		rc = -EINVAL;
+		goto free_outbuf;
+	}
+
+	for (i = 0; i < clock_info->n_pins; i++) {
+		u32 idx, connector_func;
+
+		connector =
+			MCDI_ARRAY_STRUCT_PTR(outbuf,
+					      PTP_OUT_SET_CONNECTOR_FUNCTION_FUNCTION, i);
+		idx = MCDI_STRUCT_DWORD(connector, PPS_CONNECTOR_FUNCTION_IDX);
+		connector_func = MCDI_STRUCT_DWORD(connector, PPS_CONNECTOR_FUNCTION_FUNCTION);
+		func = efx_ptp_connector_func_to_pin_func(connector_func);
+
+		if (idx >= clock_info->n_pins || func < 0) {
+			rc = -EINVAL;
+			kfree(clock_info->pin_config);
+			clock_info->pin_config = NULL;
+			goto free_outbuf;
+		}
+		clock_info->pin_config[idx].func = func;
+	}
+
+free_outbuf:
+	kfree(outbuf);
+free_inbuf:
+	kfree(inbuf);
+	return rc;
+}
+
+static int efx_ptp_set_single_connector_func(struct efx_nic *efx,
+					     unsigned int pin_idx,
+					     int connector_func)
+{
+	struct ptp_clock_info *clock_info = &efx->ptp_data->phc_clock_info;
+	size_t inlen, outlen, outlen_actual, pins, i;
+	MCDI_DECLARE_STRUCT_PTR(connector);
+	efx_dword_t *inbuf, *outbuf;
+	int rc = -ENOMEM;
+	int *new_funcs;
+	int func;
+
+	BUILD_BUG_ON(MC_CMD_PTP_OUT_SET_CONNECTOR_FUNCTION_LENMIN != 0);
+
+	inlen = MC_CMD_PTP_IN_SET_CONNECTOR_FUNCTION_LEN(1);
+	inbuf = kzalloc(inlen, GFP_KERNEL);
+	if (!inbuf)
+		return rc;
+
+	outlen = MC_CMD_PTP_OUT_SET_CONNECTOR_FUNCTION_LENMAX_MCDI2;
+	outbuf = kzalloc(outlen, GFP_KERNEL);
+	if (!outbuf)
+		goto free_inbuf;
+
+	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_SET_CONNECTOR_FUNCTION);
+	connector = MCDI_ARRAY_STRUCT_PTR(inbuf,
+					  PTP_IN_SET_CONNECTOR_FUNCTION_FUNCTION,
+					  0);
+	MCDI_STRUCT_SET_DWORD(connector, PPS_CONNECTOR_FUNCTION_IDX, pin_idx);
+	MCDI_STRUCT_SET_DWORD(connector, PPS_CONNECTOR_FUNCTION_FUNCTION,
+			      connector_func);
+
+	rc = efx_mcdi_rpc(efx, MC_CMD_PTP, inbuf, inlen,
+			  outbuf, outlen, &outlen_actual);
+	if (rc)
+		goto free_outbuf;
+
+	pins = MC_CMD_PTP_OUT_SET_CONNECTOR_FUNCTION_FUNCTION_NUM(outlen_actual);
+
+	/* Shouldn't happen */
+	if (pins != clock_info->n_pins) {
+		pci_warn(efx->pci_dev,
+			 "Expecting (%u) PPS connectors. Got (%zu) PPS connectors",
+			 clock_info->n_pins, pins);
+		rc = -EINVAL;
+		goto free_outbuf;
+	}
+
+	new_funcs = kcalloc(clock_info->n_pins, sizeof(*new_funcs), GFP_KERNEL);
+	if (!new_funcs) {
+		rc = -ENOMEM;
+		goto free_outbuf;
+	}
+
+	for (i = 0; i < clock_info->n_pins; i++) {
+		u32 idx, cf;
+
+		connector =
+			MCDI_ARRAY_STRUCT_PTR(outbuf,
+					      PTP_OUT_SET_CONNECTOR_FUNCTION_FUNCTION, i);
+		idx = MCDI_STRUCT_DWORD(connector, PPS_CONNECTOR_FUNCTION_IDX);
+		cf = MCDI_STRUCT_DWORD(connector, PPS_CONNECTOR_FUNCTION_FUNCTION);
+		func = efx_ptp_connector_func_to_pin_func(cf);
+
+		if (idx >= clock_info->n_pins || func < 0) {
+			rc = -EINVAL;
+			goto free_new_funcs;
+		}
+		new_funcs[idx] = func;
+	}
+
+	for (i = 0; i < clock_info->n_pins; i++)
+		clock_info->pin_config[i].func = new_funcs[i];
+
+free_new_funcs:
+	kfree(new_funcs);
+free_outbuf:
+	kfree(outbuf);
+free_inbuf:
+	kfree(inbuf);
+	return rc;
+}
+
+static int efx_ptp_probe_pps_connectors(struct efx_nic *efx)
+{
+	struct efx_ptp_data *ptp_data = efx->ptp_data;
+	struct ptp_clock_info *clock_info = &ptp_data->phc_clock_info;
+	struct ptp_pin_desc *desc;
+	int rc, i;
+
+	rc = efx_ptp_set_connector_funcs(efx);
+	if (rc) {
+		/* fallback to old approach */
+		clock_info->n_pins = 1;
+		clock_info->pin_config = kzalloc(sizeof(*clock_info->pin_config),
+						 GFP_KERNEL);
+		if (!clock_info->pin_config)
+			return -ENOMEM;
+		clock_info->pin_config[0].func = PTP_PF_EXTTS;
+	} else {
+		ptp_data->pps_set_connector_funcs = true;
+		if ((ptp_data->pps_connector_caps[0] &
+		     BIT(PPS_CONNECTOR_CAPABILITIES_PPS_OUT_LBN)) ||
+		    (ptp_data->pps_connector_caps[1] &
+		     BIT(PPS_CONNECTOR_CAPABILITIES_PPS_OUT_LBN)))
+			clock_info->n_per_out = 1;
+	}
+
+	for (i = 0; i < clock_info->n_pins; i++) {
+		desc = &clock_info->pin_config[i];
+		desc->index = i;
+		snprintf(desc->name, sizeof(desc->name), "pps%u", i);
+	}
+	return 0;
+}
+
 static int efx_x4_phc_enable(struct ptp_clock_info *ptp,
 			     struct ptp_clock_request *request,
 			     int enable)
@@ -2386,18 +2612,54 @@ static int efx_x4_phc_enable(struct ptp_clock_info *ptp,
 	struct efx_ptp_data *ptp_data = container_of(ptp,
 						     struct efx_ptp_data,
 						     phc_clock_info);
+	enum ptp_pin_function pin_func;
+	int connector_func;
+	unsigned int chan;
+	int pin_idx;
+	int rc;
 
 	switch (request->type) {
 	case PTP_CLK_REQ_EXTTS:
+		pin_func = PTP_PF_EXTTS;
+		chan = request->extts.index;
+		connector_func = enable ? PPS_CONNECTOR_FUNCTION_PPS_IN :
+					  PPS_CONNECTOR_FUNCTION_PPS_NONE;
+		break;
+	case PTP_CLK_REQ_PEROUT:
+		pin_func = PTP_PF_PEROUT;
+		chan = request->perout.index;
+		connector_func = enable ? PPS_CONNECTOR_FUNCTION_PPS_OUT :
+					  PPS_CONNECTOR_FUNCTION_PPS_NONE;
+		break;
 	case PTP_CLK_REQ_PPS:
 		if (enable)
 			ptp_data->usr_evt_enabled |= BIT(request->type);
 		else
 			ptp_data->usr_evt_enabled &= ~BIT(request->type);
-		break;
+		return 0;
 	default:
 		return -EOPNOTSUPP;
 	}
+
+	if (ptp_data->pps_set_connector_funcs) {
+		pin_idx = ptp_find_pin(ptp_data->phc_clock, pin_func, chan);
+		if (pin_idx < 0)
+			return -EINVAL;
+
+		rc = efx_ptp_set_single_connector_func(ptp_data->efx,
+						       pin_idx,
+						       connector_func);
+		if (rc)
+			return rc;
+	}
+
+	if (request->type == PTP_CLK_REQ_EXTTS) {
+		if (enable)
+			ptp_data->usr_evt_enabled |= BIT(request->type);
+		else
+			ptp_data->usr_evt_enabled &= ~BIT(request->type);
+	}
+
 	return 0;
 }
 #endif
@@ -2417,7 +2679,7 @@ static int efx_ptp_create_pps(struct efx_ptp_data *ptp)
 {
 	struct efx_pps_data *pps;
 
-	pps = kzalloc(sizeof(*pps), GFP_ATOMIC);
+	pps = kzalloc_obj(*pps, GFP_ATOMIC);
 	if (!pps)
 		return -ENOMEM;
 
@@ -2564,6 +2826,41 @@ static int efx_phc_verify(struct ptp_clock_info *ptp, unsigned int pin,
 	return 0;
 }
 
+static int efx_x4_phc_verify(struct ptp_clock_info *ptp, unsigned int pin,
+			     enum ptp_pin_function func, unsigned int chan)
+{
+	struct efx_ptp_data *ptp_data = container_of(ptp,
+						     struct efx_ptp_data,
+						     phc_clock_info);
+	u8 caps;
+
+	if (pin >= ARRAY_SIZE(ptp_data->pps_connector_caps))
+		return -EINVAL;
+
+	caps = ptp_data->pps_connector_caps[pin];
+
+	switch (func) {
+	case PTP_PF_NONE:
+		/* Consult caps if FW has provided else allow NONE */
+		if (caps && !(caps & BIT(PPS_CONNECTOR_CAPABILITIES_PPS_NONE_LBN)))
+			return -EINVAL;
+		break;
+	case PTP_PF_EXTTS:
+		/* Consult caps if FW has provided else allow EXTTS */
+		if (caps && !(caps & BIT(PPS_CONNECTOR_CAPABILITIES_PPS_IN_LBN)))
+			return -EINVAL;
+		break;
+	case PTP_PF_PEROUT:
+		if (!(caps & BIT(PPS_CONNECTOR_CAPABILITIES_PPS_OUT_LBN)))
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int efx_phc_getcrosststamp(struct ptp_clock_info *ptp,
 				  struct system_device_crosststamp *cts)
 {
@@ -2583,7 +2880,7 @@ static int efx_phc_getcrosststamp(struct ptp_clock_info *ptp,
 		return rc;
 
 	cts->device = timespec64_to_ktime(ptp_data->last_mc_time);
-	cts->sys_realtime = timespec64_to_ktime(ptp_data->last_host_time_real);
+	cts->sys_systime = timespec64_to_ktime(ptp_data->last_host_time_real);
 	cts->sys_monoraw = timespec64_to_ktime(ptp_data->last_host_time_raw);
 	return 0;
 }
@@ -2729,7 +3026,7 @@ static const struct ptp_clock_info efx_x4_phc_clock_info = {
 #endif
 	.getcrosststamp = efx_phc_getcrosststamp,
 	.enable		= efx_x4_phc_enable,
-	.verify		= efx_phc_verify,
+	.verify		= efx_x4_phc_verify,
 };
 
 void efx_x4_phc_set_clock_info(struct efx_nic *efx)
@@ -2820,15 +3117,12 @@ static int efx_ptp_probe_post_io(struct efx_nic *efx)
 {
 	unsigned int __maybe_unused pos;
 	struct efx_ptp_data *ptp;
-#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
-	struct ptp_pin_desc *ppd;
-#endif
 #ifdef EFX_NOT_UPSTREAM
 	bool pps_ok;
 #endif
 	int rc = 0;
 
-	ptp = kzalloc(sizeof(struct efx_ptp_data), GFP_KERNEL);
+	ptp = kzalloc_obj(struct efx_ptp_data);
 	if (!ptp)
 		return -ENOMEM;
 
@@ -2896,17 +3190,16 @@ static int efx_ptp_probe_post_io(struct efx_nic *efx)
 		if (rc)
 			goto fail4;
 
+		rc = efx_ptp_probe_pps_connectors(efx);
+		if (rc)
+			goto fail4;
+
 		ptp->phc_clock_info.max_adj = ptp->max_adjfreq;
-		ppd = &ptp->pin_config[0];
-		snprintf(ppd->name, sizeof(ppd->name), "pps0");
-		ppd->index = 0;
-		ppd->func = PTP_PF_EXTTS;
-		ptp->phc_clock_info.pin_config = ptp->pin_config;
 		ptp->phc_clock = ptp_clock_register(&ptp->phc_clock_info,
 						    &efx->pci_dev->dev);
 		if (IS_ERR(ptp->phc_clock)) {
 			rc = PTR_ERR(ptp->phc_clock);
-			goto fail4;
+			goto free_pin_config;
 		}
 		kref_get(&ptp->kref);
 #ifdef EFX_NOT_UPSTREAM
@@ -2984,8 +3277,9 @@ fail5:
 		kref_put(&ptp->kref, efx_ptp_delete_data);
 	if (ptp->phc_clock)
 		ptp_clock_unregister(ptp->phc_clock);
+free_pin_config:
+	kfree(ptp->phc_clock_info.pin_config);
 #endif
-
 fail4:
 	efx_trim_debugfs_port(efx, efx_debugfs_ptp_parameters);
 fail3:
@@ -3094,6 +3388,8 @@ void efx_ptp_remove_post_io(struct efx_nic *efx)
 #if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
 	if (ptp_data->phc_clock)
 		ptp_clock_unregister(ptp_data->phc_clock);
+	if (efx_phc_exposed(efx))
+		kfree(ptp_data->phc_clock_info.pin_config);
 #endif
 
 	efx_dissociate_phc(efx);
@@ -3123,6 +3419,15 @@ void efx_ptp_remove(struct efx_nic *efx)
 	 */
 	if (!ptp_data || !ptp_data->workwq)
 		return;
+
+	/* Signal that cross-function pps events shouldn't
+	 * access ptp during teardown.
+	 * The spinlock ensures this is atomic with respect
+	 * to efx_ptp_event.
+	 */
+	spin_lock_bh(&ptp_data->lock);
+	ptp_data->destroying = true;
+	spin_unlock_bh(&ptp_data->lock);
 
 	cancel_work_sync(&ptp_data->work);
 	cancel_delayed_work_sync(&ptp_data->cleanup_work);

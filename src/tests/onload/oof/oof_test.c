@@ -134,5 +134,83 @@ int main(int argc, char* argv[])
   if( all || !strcmp(argv[1], "llct_sanity_ll") )
     test_llct_sanity_ll();
 
+  if( all || !strcmp(argv[1], "hidden_socket") )
+    test_hidden_socket();
+
+  if( all || !strcmp(argv[1], "del_sw") )
+    test_del_sw();
+
+  if( all || !strcmp(argv[1], "addr_lifecycle") )
+    test_addr_lifecycle();
+
+  if( all || !strcmp(argv[1], "filter_redirect") )
+    test_filter_redirect();
+
+  if( all || !strcmp(argv[1], "mcast_input_validation") )
+    test_mcast_input_validation();
+
+  if( all || !strcmp(argv[1], "cluster_compat") )
+    test_cluster_compat();
+
+  if( all || !strcmp(argv[1], "threshold_sharing") )
+    test_threshold_sharing();
+
+  if( all || !strcmp(argv[1], "mcast_hw_errors") )
+    test_mcast_hw_errors();
+
+  if( all || !strcmp(argv[1], "mcast_del") )
+    test_mcast_del();
+
+  if( all || !strcmp(argv[1], "mcast_del_sw") )
+    test_mcast_del_sw();
+
+  if( all || !strcmp(argv[1], "mcast_interface_update") )
+    test_mcast_interface_update();
+
+  if( all || !strcmp(argv[1], "hwport_lifecycle") )
+    test_hwport_lifecycle();
+
+  if( all || !strcmp(argv[1], "addr_reactivate") )
+    test_addr_reactivate();
+
+  if( all || !strcmp(argv[1], "mcast_install") )
+    test_mcast_install();
+
+  if( all || !strcmp(argv[1], "udp_connect") )
+    test_udp_connect();
+
+  if( all || !strcmp(argv[1], "mcast_connected") )
+    test_mcast_connected();
+
+  if( all || !strcmp(argv[1], "socket_replace") )
+    test_socket_replace();
+
+  if( all || !strcmp(argv[1], "tproxy_global") )
+    test_tproxy_global();
+
+  if( all || !strcmp(argv[1], "tproxy_global_refcount") )
+    test_tproxy_global_refcount();
+
+  if( all || !strcmp(argv[1], "tproxy_sanity") )
+    test_tproxy_sanity();
+
+  if( all || !strcmp(argv[1], "nat_table") )
+    test_nat_table();
+
+  if( all || !strcmp(argv[1], "nat_socket") )
+    test_nat_socket();
+
+  if( all || !strcmp(argv[1], "hw_filter_errors") )
+    test_hw_filter_errors();
+
+  if( all || !strcmp(argv[1], "llct_hw_fallback") )
+    test_llct_hw_fallback();
+
+  if( all || !strcmp(argv[1], "mcast_filter_transfer") )
+    test_mcast_filter_transfer();
+
+  if( all || !strcmp(argv[1], "cluster_multi") )
+    test_cluster_multi();
+
   return 0;
 }

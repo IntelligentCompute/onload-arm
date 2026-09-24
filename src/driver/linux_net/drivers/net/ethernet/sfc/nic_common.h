@@ -16,13 +16,14 @@
 
 enum {
 	/* Revisions 0-2 were Falcon A0, A1 and B0 respectively.
+	 * Revision 3 was Siena A0.
 	 * They are not supported by this driver but these revision numbers
 	 * form part of the ethtool API for register dumping.
 	 */
-	EFX_REV_SIENA_A0 = 3,
 	EFX_REV_HUNT_A0 = 4,
 	EFX_REV_EF100 = 5,
 	EFX_REV_X4 = 6,
+	EFX_REV_X4ANA = 7,
 };
 
 static inline int efx_nic_rev(struct efx_nic *efx)
@@ -220,6 +221,18 @@ bool efx_nic_event_present(struct efx_channel *channel);
 static inline unsigned int efx_rx_recycle_ring_size(const struct efx_nic *efx)
 {
 	return efx->type->rx_recycle_ring_size(efx);
+}
+
+static inline int
+efx_nic_cxl_set_datapath(struct efx_nic *efx,
+			 enum cxl_transmit_mode *got_transmit_mode,
+			 enum cxl_receive_mode *got_receive_mode)
+{
+	if (efx->type->cxl_set_datapath)
+		return efx->type->cxl_set_datapath(efx, got_transmit_mode,
+						   got_receive_mode);
+
+	return -EOPNOTSUPP;
 }
 
 /* Some statistics are computed as A - B where A and B each increase

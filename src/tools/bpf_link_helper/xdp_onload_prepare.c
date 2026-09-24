@@ -8,24 +8,57 @@
 
 #include <errno.h>
 #include <error.h>
+#include <linux/ethtool.h>
 #include <linux/if_link.h>
+#include <linux/limits.h>
+#include <linux/sockios.h>
 #include <net/if.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
+static int get_num_rxq(char *ifname)
+{
+	struct ethtool_channels ch = {
+		.cmd = ETHTOOL_GCHANNELS,
+	};
+	struct ifreq ifr = {
+		.ifr_data = (void *)&ch,
+	};
+	int fd, ret;
+
+	strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+
+	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (fd < 0)
+		error(1, errno, "socket");
+
+	ret = ioctl(fd, SIOCETHTOOL, &ifr);
+	if (ret < 0)
+		error(1, errno, "ioctl SIOCETHTOOL");
+
+	close(fd);
+
+	return ch.rx_count + ch.combined_count;
+}
+
 int main(int argc, char **argv)
 {
+	int prog_fd, ifindex, map_path_len;
+	char map_path[PATH_MAX];
 	struct bpf_object *obj;
 	struct bpf_program *prog;
 	struct bpf_map *map_xsk;
-	int prog_fd, ifindex;
+	char *ifname;
 
 	if (argc != 3)
 		error(1, 0, "Usage: %s [ifname] [bpf_file]\n", argv[0]);
 
-	ifindex = if_nametoindex(argv[1]);
+	ifname = argv[1];
+	ifindex = if_nametoindex(ifname);
 	if (!ifindex)
 		error(1, errno, "if_nametoindex %s", argv[1]);
 
@@ -36,6 +69,8 @@ int main(int argc, char **argv)
 	map_xsk = bpf_object__find_map_by_name(obj, "onload_xdp_xsk");
 	if (!map_xsk)
 		error(1, 0, "bpf_object__find_map_by_name onload_xdp_xsk");
+
+	bpf_map__set_max_entries(map_xsk, get_num_rxq(ifname));
 
 	prog = bpf_object__find_program_by_name(obj, "xdp_onload_prog");
 	if (!prog)
@@ -54,7 +89,13 @@ int main(int argc, char **argv)
 	if (bpf_xdp_attach(ifindex, prog_fd, XDP_FLAGS_DRV_MODE, NULL))
 		error(1, 0, "bpf_program__attach_xdp");
 
-	if (bpf_object__pin_maps(obj, "/sys/fs/bpf"))
+	map_path_len = snprintf(map_path, PATH_MAX, "/sys/fs/bpf/onload_xdp_xsk_%s", ifname);
+	if (map_path_len < 0)
+		error(1, errno, "map_path");
+	if (map_path_len >= PATH_MAX)
+		error(1, ENAMETOOLONG, "map_path");
+
+	if (bpf_map__pin(map_xsk, map_path))
 		error(1, 0, "bpf_object__pin_maps");
 
 	printf("OK\n");

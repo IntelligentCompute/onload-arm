@@ -29,6 +29,17 @@ extern void context_free(struct ooft_task* task);
 extern int oo_debug_bits;
 extern int scalable_filter_gid;
 
+/* SW-filter insert fault injection (mock oof_cb_sw_filter_insert).
+ * While oof_sw_filter_insert_fail_count != 0, a matching insert returns
+ * oof_sw_filter_insert_fail_rc instead of installing the filter, and the
+ * count is decremented (if > 0).  oof_sw_filter_insert_fail_laddr, when
+ * non-zero, restricts injection to inserts for that local address (BE).
+ * An injected failure is NOT recorded as a bad add, so it models a
+ * genuine insertion failure rather than an unexpected insert. */
+extern int oof_sw_filter_insert_fail_count;
+extern int oof_sw_filter_insert_fail_rc;
+extern unsigned oof_sw_filter_insert_fail_laddr;
+
 enum ooft_rx_mode {
   OOFT_RX_FF,
   OOFT_RX_LL,
@@ -58,5 +69,31 @@ extern int test_namespace_macvlan_move(void);
 extern int test_llct_sanity(void);
 extern int test_llct_sanity_ff(void);
 extern int test_llct_sanity_ll(void);
+extern int test_hidden_socket(void);
+extern int test_del_sw(void);
+extern int test_addr_lifecycle(void);
+extern int test_filter_redirect(void);
+extern int test_mcast_input_validation(void);
+extern int test_cluster_compat(void);
+extern int test_threshold_sharing(void);
+extern int test_mcast_hw_errors(void);
+extern int test_mcast_del(void);
+extern int test_mcast_del_sw(void);
+extern int test_mcast_interface_update(void);
+extern int test_hwport_lifecycle(void);
+extern int test_addr_reactivate(void);
+extern int test_mcast_install(void);
+extern int test_udp_connect(void);
+extern int test_mcast_connected(void);
+extern int test_socket_replace(void);
+extern int test_tproxy_global_refcount(void);
+extern int test_tproxy_global(void);
+extern int test_tproxy_sanity(void);
+extern int test_nat_socket(void);
+extern int test_nat_table(void);
+extern int test_hw_filter_errors(void);
+extern int test_llct_hw_fallback(void);
+extern int test_mcast_filter_transfer(void);
+extern int test_cluster_multi(void);
 
 #endif /* __OOF_TEST_H__ */

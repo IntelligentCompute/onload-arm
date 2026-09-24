@@ -84,6 +84,8 @@ int ef_vi_add_queue(ef_vi* evq_vi, ef_vi* add_vi)
   q_label = evq_vi->vi_qs_n++;
   EF_VI_BUG_ON(evq_vi->vi_qs[q_label] != NULL);
   evq_vi->vi_qs[q_label] = add_vi;
+  EF_VI_BUG_ON(add_vi->evq_vi != NULL);
+  add_vi->evq_vi = evq_vi;
   return q_label;
 }
 
@@ -305,7 +307,7 @@ static char* ef_vi_xdp_init_qs(struct ef_vi* vi, char* q_mem, uint32_t* ids,
                                int rxq_size, int rx_prefix_len, int txq_size)
 {
   /* We need to initialise event queue to access things in the mapped memory */
-  ef_vi_init_evq(vi, 1, q_mem);
+  ef_vi_init_evq(vi, 1, q_mem, 1);
   ef_vi_init_rxq(vi, rxq_size, NULL, ids, rx_prefix_len);
   ef_vi_init_txq(vi, txq_size, NULL, ids + rxq_size);
 
@@ -314,11 +316,12 @@ static char* ef_vi_xdp_init_qs(struct ef_vi* vi, char* q_mem, uint32_t* ids,
 
 
 static char* ef_vi_sfc_init_qs(struct ef_vi* vi, char* q_mem, uint32_t* ids,
-                               int evq_size, int rxq_size, int rx_prefix_len,
+                               int evq_size, unsigned evq_max_events,
+                               int rxq_size, int rx_prefix_len,
                                int txq_size)
 {
   if( evq_size ) {
-    ef_vi_init_evq(vi, evq_size, q_mem);
+    ef_vi_init_evq(vi, evq_size, q_mem, evq_max_events);
     q_mem += ((evq_size * 8 + CI_PAGE_SIZE - 1) & CI_PAGE_MASK);
   }
   if( rxq_size ) {
@@ -336,22 +339,25 @@ static char* ef_vi_sfc_init_qs(struct ef_vi* vi, char* q_mem, uint32_t* ids,
 
 
 char* ef_vi_init_qs(struct ef_vi* vi, char* q_mem, uint32_t* ids,
-                    int evq_size, int rxq_size, int rx_prefix_len,
-                    int txq_size)
+                    int evq_size, unsigned evq_max_events, int rxq_size,
+                    int rx_prefix_len, int txq_size)
 {
   if( vi->nic_type.arch == EF_VI_ARCH_AF_XDP )
     return ef_vi_xdp_init_qs(vi, q_mem, ids, rxq_size, rx_prefix_len, txq_size);
   else
-    return ef_vi_sfc_init_qs(vi, q_mem, ids, evq_size, rxq_size,
-                             rx_prefix_len, txq_size);
+    return ef_vi_sfc_init_qs(vi, q_mem, ids, evq_size, evq_max_events,
+                             rxq_size, rx_prefix_len, txq_size);
 }
 
 
-void ef_vi_init_evq(struct ef_vi* vi, int ring_size, void* event_ring)
+void ef_vi_init_evq(struct ef_vi* vi, int ring_size, void* event_ring,
+                    unsigned max_events)
 {
   EF_VI_BUG_ON(vi->inited & EF_VI_INITED_EVQ);
+  EF_VI_BUG_ON(ring_size > 0 && (max_events == 0 || max_events > ring_size));
   vi->evq_mask = ring_size * 8 - 1;
   vi->evq_base = event_ring;
+  vi->evq_max_events = max_events;
   vi->inited |= EF_VI_INITED_EVQ;
 }
 
@@ -487,13 +493,13 @@ void ef_vi_reset_evq(struct ef_vi* vi, int clear_ring)
   /* Set unsol_seq to default, but leave 1 credit-space in reserve for overflow event. */
   vi->ep_state->evq.unsol_credit_seq = CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY - 1;
   vi->ep_state->evq.sync_flags = 0;
+  vi->ep_state->evq.min_unused_evq_slots = vi->evq_max_events;
 }
 
 
 int ef_eventq_capacity(ef_vi* vi)
 {
-  EF_VI_ASSERT( vi->ep_state->evq.evq_clear_stride <= 0 );
-  return vi->evq_mask / EF_VI_EV_SIZE - 1u + vi->ep_state->evq.evq_clear_stride;
+  return vi->evq_max_events;
 }
 
 /* TODO move this to driver code as EFHW_* APIs are not userspace interface */

@@ -346,13 +346,6 @@ citp_fdinfo* citp_tcp_dup(citp_fdinfo* orig_fdi)
   return 0;
 }
 
-ci_inline ci_uint64 linger_hash(ci_sock_cmn* s)
-{
-  return (ci_uint64)(sock_lport_be16(s) << 16) |
-         (ci_uint64)sock_rport_be16(s) |
-         ((ci_uint64)sock_raddr_be32(s) << 32);
-}
-
 #if CI_CFG_FD_CACHING
 static void citp_tcp_close(citp_fdinfo* fdinfo)
 {
@@ -2163,7 +2156,7 @@ citp_tcp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
 
     do {
       struct timespec stamp;
-      ci_rx_pkt_timespec(pkt, &stamp,
+      ci_rx_pkt_timespec(epi->sock.netif, pkt, &stamp,
                          NI_OPTS(epi->sock.netif).rx_timestamping_ordering,
                          NI_OPTS(epi->sock.netif).rx_timestamping_trailer_fmt);
 

@@ -1082,6 +1082,19 @@ int efx_x4_mcdi_link_state(struct efx_nic *efx)
 		port_data->advertised.pause = port_data->fixed_port.pause;
 	}
 
+	if (EFX_WORKAROUND_5885(efx)) {
+		/* Model does not currently support autonegotiation.
+		 * Force it to NONE to negotiate link manually. */
+		port_data->link.supported_autoneg = MC_CMD_AN_NONE;
+
+		if (port_data->link.tech == MC_CMD_ETH_TECH_NONE) {
+			port_data->link.tech =
+				efx_x4_link_tech(port_data,
+						 port_data->supported.tech_mask,
+						 false);
+		}
+	}
+
 	return 0;
 }
 
@@ -1123,6 +1136,13 @@ int efx_x4_mcdi_fixed_port_props(struct efx_nic *efx,
 	size_t outlen;
 	u8 *caps;
 	int rc;
+
+	if (efx->type->is_vf) {
+		port_data->fixed_port.max_frame_len =
+			efx->type->default_max_mtu
+			+ ETH_HLEN + VLAN_HLEN + ETH_FCS_LEN;
+		return 0;
+	}
 
 	MCDI_SET_DWORD(inbuf, GET_FIXED_PORT_PROPERTIES_IN_PORT_HANDLE,
 		       efx->port_handle);
@@ -1166,6 +1186,9 @@ int efx_x4_mcdi_transceiver_props(struct efx_nic *efx,
 	size_t outlen;
 	u8 *caps;
 	int rc;
+
+	if (efx->type->is_vf)
+		return 0; /* Not supported on VFs */
 
 	BUILD_BUG_ON(bitmap_size(MC_CMD_ETH_TECH_TECH_WIDTH) !=
 		     MC_CMD_GET_TRANSCEIVER_PROPERTIES_OUT_TECH_ABILITIES_MASK_LEN);
@@ -1226,7 +1249,7 @@ int efx_x4_mcdi_phy_probe(struct efx_nic *efx)
 	int rc;
 
 	/* Initialise and populate port_data */
-	port_data = kzalloc(sizeof(*port_data), GFP_KERNEL);
+	port_data = kzalloc_obj(*port_data);
 	if (!port_data)
 		return -ENOMEM;
 
@@ -1691,7 +1714,10 @@ int efx_x4_mcdi_nway_reset(struct efx_nic *efx)
 
 int efx_x4_mcdi_enable_netport_events(struct efx_nic *efx)
 {
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_SET_NETPORT_EVENTS_MASK);
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_SET_NETPORT_EVENTS_MASK_IN_LEN);
+
+	if (efx->type->is_vf)
+		return 0; /* Not supported on VFs */
 
 	BUILD_BUG_ON(MC_CMD_SET_NETPORT_EVENTS_MASK_OUT_LEN != 0);
 

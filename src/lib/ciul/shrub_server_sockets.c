@@ -58,12 +58,9 @@ static int unix_server_listen(struct ef_shrub_server_sockets* sockets,
   addr.sun_family = AF_UNIX;
   strcpy(addr.sun_path, server_addr);
 
+  /* Use mode of prevailing umask, avoiding path race */
   rc = bind(sockets->listen, (struct sockaddr*)&addr,
             offsetof(struct sockaddr_un, sun_path) + path_len + 1);
-  if( rc < 0 )
-    goto fail;
-
-  rc = chmod(server_addr, 0666);
   if( rc < 0 )
     goto fail;
 
@@ -74,20 +71,19 @@ fail:
   return rc;
 }
 
-int ef_shrub_server_epoll_add(struct ef_shrub_server_sockets* sockets,
-                              int fd, epoll_data_t data)
+int ef_shrub_server_epoll_add(int epoll_fd, int fd, epoll_data_t data)
 {
-  int rc;
   struct epoll_event event;
 
   event.events = EPOLLIN;
   event.data = data;
 
-  rc = epoll_ctl(sockets->epoll, EPOLL_CTL_ADD, fd, &event);
-  if( rc < 0 )
-    return -errno;
+  return ret(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event));
+}
 
-  return 0;
+int ef_shrub_server_epoll_del(int epoll_fd, int fd)
+{
+  return ret(epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL));
 }
 
 int ef_shrub_server_sockets_open(struct ef_shrub_server_sockets* sockets,
@@ -105,7 +101,7 @@ int ef_shrub_server_sockets_open(struct ef_shrub_server_sockets* sockets,
     goto fail_server_listen;
 
   epoll_data.ptr = NULL;
-  rc = ef_shrub_server_epoll_add(sockets, sockets->listen, epoll_data);
+  rc = ef_shrub_server_epoll_add(sockets->epoll, sockets->listen, epoll_data);
   if( rc < 0 )
     goto fail_epoll_add;
 

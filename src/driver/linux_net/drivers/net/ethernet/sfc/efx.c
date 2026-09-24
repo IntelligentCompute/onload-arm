@@ -71,6 +71,7 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sfc.h>
 #endif
+#include "efx_cxl.h"
 
 #ifdef EFX_NOT_UPSTREAM
 /* Allocate resources for XDP transmit and redirect functionality.
@@ -913,9 +914,7 @@ static void efx_unregister_netdev(struct efx_nic *efx)
  *
  **************************************************************************/
 
-/* PCI device ID table.
- * On changes make sure to update sfc_pci_table, below
- */
+/* PCI device ID table. */
 static const struct pci_device_id efx_pci_table[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x0903),  /* SFC9120 PF */
 	 .driver_data = (unsigned long) &efx_hunt_a0_nic_type},
@@ -953,55 +952,20 @@ static const struct pci_device_id efx_pci_table[] = {
 	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
 	 .class_mask =  0xffff00,
 	 .driver_data = (unsigned long)&efx_x4_vf_nic_type},
-	{0}			/* end of list */
-};
-
-/* Module device ID table - efx_pci_table + ef100_pci_table */
-static const struct pci_device_id sfc_pci_table[] = {
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x0903),  /* SFC9120 PF */
-	 .driver_data = (unsigned long) &efx_hunt_a0_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1903),  /* SFC9120 VF */
+	{PCI_DEVICE(PCI_VENDOR_ID_AMD, 0x1190), 	/* X4A PF */
+	 .driver_data = (unsigned long)&efx_x4ana_nic_type},
+	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x8c03),  /* X4D PF (FF/LL) */
+	 .driver_data = (unsigned long)&efx_x4_nic_type},
+	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x9c03),  /* X4D VF (FF/LL) */
 	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
 	 .class_mask =  0xffff00,
-	 .driver_data = (unsigned long) &efx_hunt_a0_vf_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x0923),  /* SFC9140 PF */
-	 .driver_data = (unsigned long) &efx_hunt_a0_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1923),  /* SFC9140 VF */
+	 .driver_data = (unsigned long)&efx_x4_vf_nic_type},
+	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0xac03),  /* X4D PF (FF only) */
+	 .driver_data = (unsigned long)&efx_x4_nic_type},
+	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0xbc03),  /* X4D VF (FF only) */
 	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
 	 .class_mask =  0xffff00,
-	 .driver_data = (unsigned long) &efx_hunt_a0_vf_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x0a03),  /* SFC9220 PF */
-	 .driver_data = (unsigned long) &efx_hunt_a0_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1a03),  /* SFC9220 VF */
-	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
-	 .class_mask =  0xffff00,
-	 .driver_data = (unsigned long) &efx_hunt_a0_vf_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x0b03),  /* SFC9250 PF */
-	 .driver_data = (unsigned long) &efx_hunt_a0_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1b03),  /* SFC9250 VF */
-	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
-	 .class_mask =  0xffff00,
-	 .driver_data = (unsigned long) &efx_hunt_a0_vf_nic_type},
-#if IS_ENABLED(CONFIG_SFC_EF100)
-	{PCI_DEVICE(PCI_VENDOR_ID_XILINX, 0x0100),  /* Riverhead PF */
-	 .driver_data = (unsigned long) &ef100_pf_nic_type },
-	{PCI_DEVICE(PCI_VENDOR_ID_XILINX, 0x1100),  /* Riverhead VF */
-	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
-	 .class_mask =  0xffff00,
-	 .driver_data = (unsigned long) &ef100_vf_nic_type },
-#endif
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x0c03),  /* X4 PF (FF/LL) */
-	 .driver_data = (unsigned long) &efx_x4_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1c03),  /* X4 VF (FF/LL) */
-	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
-	 .class_mask =  0xffff00,
-	 .driver_data = (unsigned long) &efx_x4_vf_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x2c03),  /* X4 PF (FF only) */
-	 .driver_data = (unsigned long) &efx_x4_nic_type},
-	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x3c03),  /* X4 VF (FF only) */
-	 .class = PCI_CLASS_NETWORK_ETHERNET << 8,
-	 .class_mask =  0xffff00,
-	 .driver_data = (unsigned long) &efx_x4_vf_nic_type},
+	 .driver_data = (unsigned long)&efx_x4_vf_nic_type},
 	{0}			/* end of list */
 };
 
@@ -1042,6 +1006,10 @@ void efx_pci_remove_post_io(struct efx_nic *efx,
 	efx_ptp_remove_post_io(efx);
 #endif
 	efx->type->remove_port(efx);
+	/* Devlink must be torn down before MCDI is freed, since devlink
+	 * callbacks issue MCDI commands.
+	 */
+	efx_fini_devlink(efx);
 	nic_remove(efx);
 	efx_remove_common(efx);
 #ifdef CONFIG_DEBUG_FS
@@ -1096,6 +1064,11 @@ int efx_pci_probe_post_io(struct efx_nic *efx,
 	rc = nic_probe(efx);
 	if (rc)
 		return rc;
+
+	/* Devlink callbacks (e.g. info_get) issue MCDI commands, so
+	 * registration must wait until MCDI is fully initialised.
+	 */
+	(void)efx_probe_devlink(efx);
 
 #ifdef EFX_NOT_UPSTREAM
 	if (efx->mcdi->fn_flags &
@@ -1239,11 +1212,13 @@ static void efx_pci_remove(struct pci_dev *pci_dev)
 	efx_fini_io(efx);
 	pci_dbg(efx->pci_dev, "shutdown successful\n");
 
+	probe_data = efx_nic_to_probe_data(efx);
+	efx_cxl_exit(probe_data);
+
 	free_netdev(efx->net_dev);
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_PCI_ENABLE_PCIE_ERROR_REPORTING)
 	pci_disable_pcie_error_reporting(pci_dev);
 #endif
-	probe_data = efx_nic_to_probe_data(efx);
 	efx_fini_probe_data(probe_data);
 };
 
@@ -1268,12 +1243,14 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 	nic_type = (const struct efx_nic_type *)entry->driver_data;
 	rc = efx_init_probe_data(pci_dev, nic_type, &probe_data);
 	if (rc)
-		goto fail;
+		return rc;
 
 	/* Allocate and initialise a struct net_device */
 	net_dev = alloc_etherdev_mq(sizeof(probe_data), EFX_MAX_CORE_TX_QUEUES);
-	if (!net_dev)
-		return -ENOMEM;
+	if (!net_dev) {
+		rc = -ENOMEM;
+		goto fail0;
+	}
 	probe_ptr = netdev_priv(net_dev);
 	*probe_ptr = probe_data;
 	efx = &probe_data->efx;
@@ -1282,8 +1259,10 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 	efx_init_features(efx);
 	SET_NETDEV_DEV(net_dev, &pci_dev->dev);
 #ifdef CONFIG_SFC_MTD
-	if (efx_mtd_init(efx) < 0)
-		goto fail;
+	if (efx_mtd_init(efx) < 0) {
+		rc = -EIO;
+		goto fail1;
+	}
 #endif
 
 	pci_info(pci_dev,
@@ -1299,25 +1278,29 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 #endif
 
 	/* Set up basic I/O (BAR mappings etc) */
-	rc = efx_init_io(efx, efx->type->mem_bar(efx), efx->type->max_dma_mask,
+	rc = efx_init_io(efx, efx->type->mem_bar(efx),
 			 efx->type->mem_map_size(efx));
 	if (rc)
-		goto fail;
+		goto fail2;
+
+	rc = efx_cxl_init(probe_data);
+	if (rc)
+		goto fail3;
 
 	efx->netdev_notifier.notifier_call = efx_netdev_event;
 	rc = register_netdevice_notifier(&efx->netdev_notifier);
 	if (rc)
-		goto fail;
+		goto fail4;
 
 #ifdef CONFIG_SFC_DUMP
 	rc = efx_dump_init(efx);
 	if (rc)
-		goto fail;
+		goto fail5;
 #endif
 
 	rc = efx->type->probe(efx);
 	if (rc)
-		goto fail;
+		goto fail6;
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_SOCK)
 	efx->tx_queues_per_channel++;
@@ -1340,14 +1323,14 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 	if (rc) {
 		netif_err(efx, drv, efx->net_dev,
 			  "failed to init net dev attributes\n");
-		goto fail;
+		goto fail6;
 	}
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 	rc = device_create_file(&efx->pci_dev->dev, &dev_attr_lro);
 	if (rc) {
 		netif_err(efx, drv, efx->net_dev,
 			  "failed to init net dev attributes\n");
-		goto fail;
+		goto fail6;
 	}
 #endif
 
@@ -1389,8 +1372,23 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 
 	return 0;
 
-fail:
+fail6:
 	efx_pci_remove(pci_dev);
+	return rc;
+fail5:
+	unregister_netdevice_notifier(&efx->netdev_notifier);
+fail4:
+	efx_cxl_exit(probe_data);
+fail3:
+	efx_fini_io(efx);
+fail2:
+#ifdef CONFIG_SFC_MTD
+	efx_mtd_free(efx);
+fail1:
+#endif
+	free_netdev(net_dev);
+fail0:
+	efx_fini_probe_data(probe_data);
 	return rc;
 }
 
@@ -1771,7 +1769,7 @@ MODULE_AUTHOR("Solarflare Communications and "
 	      "Michael Brown <mbrown@fensystems.co.uk>");
 MODULE_DESCRIPTION("Solarflare network driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(pci, sfc_pci_table);
+MODULE_DEVICE_TABLE(pci, efx_pci_table);
 #ifdef EFX_NOT_UPSTREAM
 MODULE_VERSION(EFX_DRIVER_VERSION);
 #endif

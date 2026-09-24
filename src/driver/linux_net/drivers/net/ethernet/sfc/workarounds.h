@@ -42,9 +42,11 @@
 	((struct efx_ef10_nic_data *)efx->nic_data)->workaround_61265
 
 #define EFX_WORKAROUND_X4(efx) (efx_nic_rev(efx) == EFX_REV_X4)
+#define EFX_WORKAROUND_X4ANA(efx) (efx_nic_rev(efx) == EFX_REV_X4ANA)
 
-/* X4 development firmware does not support periodic stats */
-#define EFX_WORKAROUND_5316(efx) EFX_WORKAROUND_X4(efx)
+/* X4/X4ANA development firmware does not support periodic stats */
+#define EFX_WORKAROUND_5316(efx) (EFX_WORKAROUND_X4(efx) ||	\
+				  EFX_WORKAROUND_X4ANA(efx))
 
 /* X4 development models report KX4 phy media type, which will
  * not be true in production.
@@ -55,6 +57,22 @@
  * RX_TRUNC_ERR event flag. Report this flag as a CRC error as that is more
  * likely.
  */
-#define EFX_WORKAROUND_7148(efx) EFX_WORKAROUND_X4(efx)
+#define EFX_WORKAROUND_7148(efx) (EFX_WORKAROUND_X4(efx) ||	\
+				  EFX_WORKAROUND_X4ANA(efx))
+
+/* X4ANA model fails to select datapath firmware variant. */
+#define EFX_WORKAROUND_5884(efx) EFX_WORKAROUND_X4ANA(efx)
+
+/* X4ANA development FW/model are built without ANLT, so an autoneg
+ * LINK_CTRL never resolves a link technology and the port stays down.
+ */
+#define EFX_WORKAROUND_5885(efx) EFX_WORKAROUND_X4ANA(efx)
+
+/* HW cannot access the final 4k NIC buffer table page in the advertised
+ * 48-bit DMA range
+ */
+#define EFX_WORKAROUND_7785(efx) (EFX_WORKAROUND_EF10(efx) ||	\
+				  EFX_WORKAROUND_X4(efx) ||	\
+				  EFX_WORKAROUND_X4ANA(efx))
 
 #endif /* EFX_WORKAROUNDS_H */
